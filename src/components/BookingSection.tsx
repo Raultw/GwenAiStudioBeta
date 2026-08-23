@@ -1,0 +1,1008 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Calendar as CalendarIcon, 
+  Clock, 
+  Check, 
+  Sparkles, 
+  AlertCircle, 
+  Send, 
+  User, 
+  Phone, 
+  Mail,
+  FileText, 
+  ChevronLeft, 
+  ChevronRight,
+  Download,
+  CalendarPlus,
+  CheckCircle2,
+  ExternalLink,
+  MessageCircle
+} from 'lucide-react';
+import confetti from 'canvas-confetti';
+import type { Service, DayAvailability, Appointment, TimeSlot } from '../types.js';
+
+interface BookingSectionProps {
+  services: Service[];
+  preselectedServiceId: string | null;
+  onClearPreselection: () => void;
+}
+
+export const BookingSection: React.FC<BookingSectionProps> = ({
+  services,
+  preselectedServiceId,
+  onClearPreselection,
+}) => {
+  // Form State
+  const [selectedServiceId, setSelectedServiceId] = useState<string>('');
+  const [selectedDate, setSelectedDate] = useState<string>('');
+  const [selectedTime, setSelectedTime] = useState<string>('');
+  const [nombre, setNombre] = useState<string>('');
+  const [apellido, setApellido] = useState<string>('');
+  const [telefono, setTelefono] = useState<string>('');
+  const [email, setEmail] = useState<string>('');
+  const [observaciones, setObservaciones] = useState<string>('');
+
+  // Anonymous Device Identifier for backend client association
+  const getBrowserId = () => {
+    try {
+      let bId = localStorage.getItem('gwen_client_dev_id');
+      if (!bId) {
+        bId = 'dev-' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+        localStorage.setItem('gwen_client_dev_id', bId);
+      }
+      return bId;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // Refs for smooth focus/scroll
+  const confirmationRef = useRef<HTMLDivElement | null>(null);
+  const sectionRef = useRef<HTMLElement | null>(null);
+
+  // Calendar view state
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => new Date());
+
+  // Availability State
+  const [availability, setAvailability] = useState<DayAvailability | null>(null);
+  const [isLoadingAvailability, setIsLoadingAvailability] = useState<boolean>(false);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
+
+  // Submission State
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [confirmedBooking, setConfirmedBooking] = useState<{
+    turno: Appointment;
+    whatsappUrl: string;
+  } | null>(null);
+
+  // Automatically scroll to the confirmed booking card when reservation succeeds
+  useEffect(() => {
+    if (confirmedBooking) {
+      setTimeout(() => {
+        if (confirmationRef.current) {
+          confirmationRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else if (sectionRef.current) {
+          sectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 60);
+    }
+  }, [confirmedBooking]);
+
+  // Field validation errors
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // Sync preselected service from parent
+  useEffect(() => {
+    if (preselectedServiceId) {
+      setSelectedServiceId(preselectedServiceId);
+      onClearPreselection();
+    } else if (!selectedServiceId && services.length > 0) {
+      // Default to popular or first service
+      const popular = services.find(s => s.esPopular) || services[0];
+      setSelectedServiceId(popular.id);
+    }
+  }, [preselectedServiceId, services]);
+
+  // Set default initial date to tomorrow or today
+  useEffect(() => {
+    if (!selectedDate) {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      // If tomorrow is Sunday, advance to Monday
+      if (tomorrow.getDay() === 0) {
+        tomorrow.setDate(tomorrow.getDate() + 1);
+      }
+      const yyyy = tomorrow.getFullYear();
+      const mm = String(tomorrow.getMonth() + 1).padStart(2, '0');
+      const dd = String(tomorrow.getDate()).padStart(2, '0');
+      setSelectedDate(`${yyyy}-${mm}-${dd}`);
+      setCalendarMonth(new Date(yyyy, tomorrow.getMonth(), 1));
+    }
+  }, [selectedDate]);
+
+  // Selected Service Object
+  const selectedService = useMemo(() => {
+    return services.find(s => s.id === selectedServiceId) || services[0];
+  }, [services, selectedServiceId]);
+
+  // Fetch Availability when date or service changes
+  useEffect(() => {
+    if (!selectedDate || !selectedServiceId) return;
+
+    let isMounted = true;
+    setIsLoadingAvailability(true);
+    setAvailabilityError(null);
+
+    const fetchAvailability = async () => {
+      try {
+        const res = await fetch(`/api/availability?date=${selectedDate}&service_id=${selectedServiceId}`);
+        if (!res.ok) {
+          throw new Error('No se pudo verificar la disponibilidad para esta fecha.');
+        }
+        const data: DayAvailability = await res.json();
+        if (isMounted) {
+          setAvailability(data);
+          // If previously selected time is no longer available in new slots, clear it
+          if (selectedTime) {
+            const slotStillAvailable = data.slots.some(
+              s => s.hora === selectedTime && s.disponible
+            );
+            if (!slotStillAvailable) {
+              setSelectedTime('');
+            }
+          }
+        }
+      } catch (err: any) {
+        if (isMounted) {
+          setAvailabilityError(err.message || 'Error al consultar disponibilidad.');
+          setAvailability(null);
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingAvailability(false);
+        }
+      }
+    };
+
+    fetchAvailability();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedDate, selectedServiceId]);
+
+  // Calculate End Time
+  const calculatedEndTime = useMemo(() => {
+    if (!selectedTime || !selectedService) return '';
+    const [h, m] = selectedTime.split(':').map(Number);
+    const totalMinutes = h * 60 + m + selectedService.duracionMinutos;
+    const endH = Math.floor(totalMinutes / 60);
+    const endM = totalMinutes % 60;
+    return `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+  }, [selectedTime, selectedService]);
+
+  // Calendar Helpers
+  const daysInMonth = useMemo(() => {
+    const year = calendarMonth.getFullYear();
+    const month = calendarMonth.getMonth();
+    const firstDayIndex = new Date(year, month, 1).getDay(); // 0 is Sunday
+    // adjust to Monday start: Monday=0, ..., Sunday=6
+    const adjustedFirstDay = (firstDayIndex + 6) % 7;
+    const totalDays = new Date(year, month + 1, 0).getDate();
+
+    const days: Array<{ dayNumber: number; dateStr: string; isPast: boolean; isSunday: boolean } | null> = [];
+
+    // Blank padding for days before the 1st
+    for (let i = 0; i < adjustedFirstDay; i++) {
+      days.push(null);
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (let d = 1; d <= totalDays; d++) {
+      const curDate = new Date(year, month, d);
+      const isPast = curDate < today;
+      const isSunday = curDate.getDay() === 0;
+      const yyyy = year;
+      const mm = String(month + 1).padStart(2, '0');
+      const dd = String(d).padStart(2, '0');
+      days.push({
+        dayNumber: d,
+        dateStr: `${yyyy}-${mm}-${dd}`,
+        isPast,
+        isSunday,
+      });
+    }
+
+    return days;
+  }, [calendarMonth]);
+
+  const monthNames = [
+    'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+  ];
+
+  const handlePrevMonth = () => {
+    setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1));
+  };
+
+  const handleNextMonth = () => {
+    setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1));
+  };
+
+  // Field validation
+  const validate = () => {
+    const newErrors: Record<string, string> = {};
+
+    if (!selectedServiceId) newErrors.service = 'Seleccioná un servicio.';
+    if (!selectedDate) newErrors.date = 'Seleccioná una fecha.';
+    if (!selectedTime) newErrors.time = 'Seleccioná un horario disponible.';
+
+    if (!nombre.trim() || nombre.trim().length < 2) {
+      newErrors.nombre = 'Ingresá un nombre válido (mínimo 2 letras).';
+    }
+    if (!apellido.trim() || apellido.trim().length < 2) {
+      newErrors.apellido = 'Ingresá un apellido válido.';
+    }
+    if (!telefono.trim() || !/^[\d\-\+\s]{7,20}$/.test(telefono.trim())) {
+      newErrors.telefono = 'Ingresá un teléfono válido (ej: 011-1565852012).';
+    }
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  // Submit Handler
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitError(null);
+
+    if (!validate()) {
+      const firstErr = document.querySelector('.form-error-marker');
+      firstErr?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const payload = {
+        nombre: nombre.trim(),
+        apellido: apellido.trim(),
+        telefono: telefono.trim(),
+        email: email.trim() ? email.trim() : undefined,
+        servicio_id: selectedServiceId,
+        fecha: selectedDate,
+        hora_inicio: selectedTime,
+        observaciones: observaciones.trim(),
+        browserId: getBrowserId()
+      };
+
+      const res = await fetch('/api/turnos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        if (res.status === 409) {
+          // Time slot conflict
+          setSubmitError('El horario seleccionado acaba de ser ocupado. Por favor elegí otro de los horarios disponibles.');
+          // Re-fetch slots
+          const refreshRes = await fetch(`/api/availability?date=${selectedDate}&service_id=${selectedServiceId}`);
+          if (refreshRes.ok) {
+            const refreshData = await refreshRes.json();
+            setAvailability(refreshData);
+          }
+        } else {
+          setSubmitError(data.error || 'Hubo un inconveniente al procesar tu turno. Verificá los datos ingresados.');
+        }
+        setIsSubmitting(false);
+        return;
+      }
+
+      // Success! Fire celebratory confetti
+      confetti({
+        particleCount: 80,
+        spread: 70,
+        origin: { y: 0.6 },
+        colors: ['#8E4455', '#D4AF37', '#E8C5CE', '#241E1A']
+      });
+
+      setConfirmedBooking({
+        turno: data.turno,
+        whatsappUrl: data.whatsappUrl
+      });
+
+      // Clear Form state
+      setSelectedTime('');
+      setObservaciones('');
+
+    } catch (err: any) {
+      setSubmitError('Error de comunicación con el servidor. Podés intentar nuevamente o comunicarte directamente por WhatsApp.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Split morning and afternoon slots
+  const { morningSlots, afternoonSlots } = useMemo(() => {
+    if (!availability || !availability.slots) return { morningSlots: [], afternoonSlots: [] };
+    const morning: TimeSlot[] = [];
+    const afternoon: TimeSlot[] = [];
+
+    availability.slots.forEach(slot => {
+      const hour = parseInt(slot.hora.split(':')[0], 10);
+      if (hour < 13) {
+        morning.push(slot);
+      } else {
+        afternoon.push(slot);
+      }
+    });
+
+    return { morningSlots: morning, afternoonSlots: afternoon };
+  }, [availability]);
+
+  // Google Calendar Link generator
+  const createGoogleCalendarLink = (apt: Appointment) => {
+    const [year, month, day] = apt.fecha.split('-').map(Number);
+    const [startH, startM] = apt.horaInicio.split(':').map(Number);
+    const [endH, endM] = apt.horaFin.split(':').map(Number);
+
+    const startDate = new Date(year, month - 1, day, startH, startM);
+    const endDate = new Date(year, month - 1, day, endH, endM);
+
+    const formatGDate = (d: Date) => d.toISOString().replace(/-|:|\.\d+/g, '');
+
+    const title = encodeURIComponent(`Turno Gwen Nails: ${apt.servicioNombre}`);
+    const details = encodeURIComponent(
+      `Turno confirmado para ${apt.nombre} ${apt.apellido}\nCódigo: ${apt.codigo}\nServicio: ${apt.servicioNombre}\nEstudio: Gorriti 5540, Palermo Hollywood, CABA`
+    );
+    const location = encodeURIComponent('Gorriti 5540, Palermo, CABA, Argentina');
+
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${formatGDate(startDate)}/${formatGDate(endDate)}&details=${details}&location=${location}`;
+  };
+
+  return (
+    <section id="turnos" ref={sectionRef} className="py-20 md:py-28 bg-[#FAF7F2] relative scroll-mt-6">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        
+        {/* Section Title */}
+        <div className="text-center max-w-3xl mx-auto mb-16">
+          <span className="text-xs uppercase tracking-[0.25em] text-[#8E4455] font-semibold mb-3 block">
+            Agenda Online en Tiempo Real
+          </span>
+          <h2 className="font-serif text-3xl sm:text-4xl md:text-5xl text-[#241E1A] font-medium tracking-tight mb-4">
+            Reservá tu turno en 3 simples pasos
+          </h2>
+          <p className="text-base text-[#5A4B43] font-light leading-relaxed">
+            Elegí tu servicio, seleccioná la fecha y el horario disponible que mejor te convenga y asegurá tu lugar al instante.
+          </p>
+        </div>
+
+        {/* Confirmation Success Modal / View */}
+        {confirmedBooking ? (
+          <div ref={confirmationRef} className="max-w-2xl mx-auto bg-white rounded-3xl p-8 sm:p-12 border border-[#E8DCD5] shadow-xl text-center animate-in zoom-in-95 duration-300 scroll-mt-24">
+            <div className="w-16 h-16 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-6 border border-emerald-200">
+              <CheckCircle2 className="w-8 h-8" />
+            </div>
+
+            <span className="text-xs uppercase tracking-widest text-[#8E4455] font-semibold block mb-1">
+              ¡Turno Reservado con Éxito!
+            </span>
+            <h3 className="font-serif text-3xl sm:text-4xl font-medium text-[#241E1A] mb-4">
+              Te esperamos en el estudio
+            </h3>
+            <p className="text-sm text-[#5A4B43] max-w-lg mx-auto mb-8 font-light">
+              Hemos registrado tu reserva para <strong className="text-[#241E1A]">{confirmedBooking.turno.nombre} {confirmedBooking.turno.apellido}</strong>. A continuación podés confirmar los detalles por WhatsApp y agregarlo a tu calendario.
+            </p>
+
+            {/* Ticket Card */}
+            <div className="bg-[#FAF7F2] rounded-2xl p-6 border border-[#E8DCD5] text-left mb-8 space-y-3">
+              <div className="flex justify-between items-center pb-3 border-b border-[#E8DCD5]">
+                <span className="text-xs text-[#8C7A70] uppercase tracking-wider">Código de Reserva</span>
+                <span className="font-mono font-bold text-[#8E4455] text-sm bg-white px-2.5 py-0.5 rounded-md border border-[#E8DCD5]">
+                  {confirmedBooking.turno.codigo}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 text-xs sm:text-sm">
+                <div>
+                  <span className="text-[#8C7A70] block text-xs">Servicio:</span>
+                  <span className="font-medium text-[#241E1A]">{confirmedBooking.turno.servicioNombre}</span>
+                </div>
+                {confirmedBooking.turno.profesionalNombre && (
+                  <div>
+                    <span className="text-[#8C7A70] block text-xs">Profesional:</span>
+                    <span className="font-medium text-[#241E1A] flex items-center gap-1">
+                      <span>👩‍🎨</span> {confirmedBooking.turno.profesionalNombre}
+                    </span>
+                  </div>
+                )}
+                <div>
+                  <span className="text-[#8C7A70] block text-xs">Fecha & Horario:</span>
+                  <span className="font-medium text-[#241E1A]">
+                    {confirmedBooking.turno.fecha} · {confirmedBooking.turno.horaInicio} a {confirmedBooking.turno.horaFin} hs
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[#8C7A70] block text-xs">Duración:</span>
+                  <span className="font-medium text-[#241E1A]">{confirmedBooking.turno.duracionMinutos} minutos</span>
+                </div>
+                <div>
+                  <span className="text-[#8C7A70] block text-xs">Monto Total:</span>
+                  <span className="font-semibold text-[#8E4455] text-base">
+                    ${confirmedBooking.turno.precio.toLocaleString('es-AR')} ARS
+                  </span>
+                </div>
+              </div>
+
+              {confirmedBooking.turno.observaciones && (
+                <div className="pt-2 border-t border-[#E8DCD5] text-xs">
+                  <span className="text-[#8C7A70] block">Observaciones:</span>
+                  <span className="text-[#5A4B43] italic">{confirmedBooking.turno.observaciones}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="flex flex-col sm:flex-row gap-3 justify-center mb-6">
+              <a
+                href={confirmedBooking.whatsappUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-full bg-[#25D366] hover:bg-[#20bd5a] text-white text-sm font-medium shadow-sm transition-all"
+              >
+                <MessageCircle className="w-4 h-4 fill-current" />
+                <span>Confirmar por WhatsApp</span>
+              </a>
+
+              <a
+                href={createGoogleCalendarLink(confirmedBooking.turno)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-full bg-white border border-[#D9C9BF] text-[#241E1A] text-sm font-medium hover:bg-[#FAF7F2] transition-all"
+              >
+                <CalendarPlus className="w-4 h-4 text-[#8E4455]" />
+                <span>Agregar a Google Calendar</span>
+              </a>
+            </div>
+
+            <button
+              onClick={() => setConfirmedBooking(null)}
+              className="text-xs text-[#8C7A70] hover:text-[#241E1A] underline cursor-pointer"
+            >
+              Hacer otra reserva
+            </button>
+          </div>
+        ) : (
+          /* Main Booking Form Grid */
+          <form onSubmit={handleSubmit} className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+            
+            {/* Left Col: Step 1 & 2 & 3 */}
+            <div className="lg:col-span-8 space-y-8">
+              
+              {/* STEP 1: Servicio */}
+              <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#E8DCD5] shadow-xs">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-8 h-8 rounded-full bg-[#8E4455] text-white flex items-center justify-center text-xs font-bold">
+                    1
+                  </div>
+                  <div>
+                    <h3 className="font-serif text-xl sm:text-2xl font-medium text-[#241E1A]">
+                      Seleccioná tu Servicio
+                    </h3>
+                    <p className="text-xs text-[#7A6B62]">El tiempo de los turnos se ajustará según la duración del tratamiento.</p>
+                  </div>
+                </div>
+
+                <div className="divide-y divide-[#F2EAE4] rounded-2xl border border-[#E8DCD5] bg-white overflow-hidden shadow-xs">
+                  {services.filter(s => s.activo).map((service) => {
+                    const isSelected = selectedServiceId === service.id;
+                    return (
+                      <button
+                        type="button"
+                        key={service.id}
+                        onClick={() => setSelectedServiceId(service.id)}
+                        className={`w-full text-left p-3.5 sm:py-3.5 sm:px-5 flex items-start sm:items-center justify-between gap-3 transition-colors cursor-pointer ${
+                          isSelected
+                            ? 'bg-[#FDF6F4]'
+                            : 'hover:bg-[#FAF7F2]'
+                        }`}
+                      >
+                        <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
+                          <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 sm:mt-0 transition-colors ${
+                            isSelected
+                              ? 'border-[#8E4455] bg-[#8E4455]'
+                              : 'border-[#D9C9BF] bg-white'
+                          }`}>
+                            {isSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-sm sm:text-base font-medium leading-snug sm:truncate ${
+                              isSelected ? 'text-[#8E4455] font-semibold' : 'text-[#241E1A]'
+                            }`}>
+                              {service.nombre}
+                            </div>
+                            
+                            {/* Información secundaria en móviles (2da línea) */}
+                            <div className="flex sm:hidden items-center gap-3 mt-1 text-xs">
+                              <span className="text-[#7A6B62] flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-[#8E4455]" />
+                                {service.duracionMinutos} min
+                              </span>
+                              <span className="text-[#D9C9BF]">·</span>
+                              <span className="font-semibold text-[#8E4455]">
+                                ${service.precio.toLocaleString('es-AR')}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Información en pantallas medianas y grandes (a la derecha) */}
+                        <div className="hidden sm:flex items-center gap-6 shrink-0 text-sm">
+                          <span className="text-[#7A6B62] flex items-center gap-1">
+                            <Clock className="w-3.5 h-3.5 text-[#8E4455]" />
+                            {service.duracionMinutos} min
+                          </span>
+                          <span className="font-semibold text-[#8E4455] text-right min-w-[75px]">
+                            ${service.precio.toLocaleString('es-AR')}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                {errors.service && (
+                  <p className="mt-3 text-xs text-rose-600 form-error-marker">{errors.service}</p>
+                )}
+              </div>
+
+              {/* STEP 2: Calendario & Horarios */}
+              <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#E8DCD5] shadow-xs">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-8 h-8 rounded-full bg-[#8E4455] text-white flex items-center justify-center text-xs font-bold">
+                    2
+                  </div>
+                  <div>
+                    <h3 className="font-serif text-xl sm:text-2xl font-medium text-[#241E1A]">
+                      Elegí Fecha y Horario
+                    </h3>
+                    <p className="text-xs text-[#7A6B62]">Disponibilidad en tiempo real calculada automáticamente.</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
+                  
+                  {/* Custom Calendar Column */}
+                  <div className="md:col-span-6 bg-[#FAF7F2] p-5 rounded-2xl border border-[#E8DCD5]">
+                    
+                    {/* Calendar Header */}
+                    <div className="flex items-center justify-between mb-4">
+                      <h4 className="font-serif text-lg font-medium text-[#241E1A] capitalize">
+                        {monthNames[calendarMonth.getMonth()]} {calendarMonth.getFullYear()}
+                      </h4>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={handlePrevMonth}
+                          className="p-1.5 rounded-lg hover:bg-white border border-[#D9C9BF] text-[#4A3E39] transition-colors cursor-pointer"
+                          aria-label="Mes anterior"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleNextMonth}
+                          className="p-1.5 rounded-lg hover:bg-white border border-[#D9C9BF] text-[#4A3E39] transition-colors cursor-pointer"
+                          aria-label="Mes siguiente"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Day Headers (Lu - Do) */}
+                    <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-semibold text-[#8C7A70] uppercase mb-2">
+                      <span>Lu</span>
+                      <span>Ma</span>
+                      <span>Mi</span>
+                      <span>Ju</span>
+                      <span>Vi</span>
+                      <span>Sá</span>
+                      <span className="text-rose-400">Do</span>
+                    </div>
+
+                    {/* Calendar Days Matrix */}
+                    <div className="grid grid-cols-7 gap-1 text-center">
+                      {daysInMonth.map((dayObj, index) => {
+                        if (!dayObj) {
+                          return <div key={`blank-${index}`} className="h-9" />;
+                        }
+
+                        const isSelected = selectedDate === dayObj.dateStr;
+                        const isDisabled = dayObj.isPast || dayObj.isSunday;
+
+                        return (
+                          <button
+                            key={dayObj.dateStr}
+                            type="button"
+                            disabled={isDisabled}
+                            onClick={() => {
+                              setSelectedDate(dayObj.dateStr);
+                              setSelectedTime('');
+                            }}
+                            className={`h-9 rounded-xl text-xs font-medium transition-all flex items-center justify-center cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#8E4455] text-white shadow-xs font-bold scale-105'
+                                : isDisabled
+                                ? 'text-[#C4B0A3] cursor-not-allowed opacity-40'
+                                : 'text-[#241E1A] hover:bg-white hover:border border-[#D9C9BF] bg-white/60'
+                            }`}
+                          >
+                            {dayObj.dayNumber}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-[#E8DCD5] flex items-center justify-between text-[11px] text-[#7A6B62]">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-[#8E4455]"></span> Seleccionado
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-[#C4B0A3]"></span> No disponible / Domingo
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Time Slots Column */}
+                  <div className="md:col-span-6">
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="text-xs font-medium text-[#4A3E39]">
+                        Horarios Disponibles para {selectedDate || 'la fecha'}:
+                      </span>
+                      {availability && availability.abierto && (
+                        <span className="text-[11px] bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-md border border-emerald-200">
+                          {availability.slotsDisponiblesCount} libres
+                        </span>
+                      )}
+                    </div>
+
+                    {isLoadingAvailability ? (
+                      <div className="p-8 text-center bg-[#FAF7F2] rounded-2xl border border-[#E8DCD5]">
+                        <div className="w-6 h-6 border-2 border-[#8E4455] border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                        <p className="text-xs text-[#7A6B62]">Calculando disponibilidad...</p>
+                      </div>
+                    ) : availabilityError ? (
+                      <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-700 flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                        <span>{availabilityError}</span>
+                      </div>
+                    ) : availability && !availability.abierto ? (
+                      <div className="p-6 bg-[#FAF7F2] border border-[#E8DCD5] rounded-2xl text-center text-xs text-[#7A6B62]">
+                        <p className="font-medium text-[#241E1A] mb-1">Día no disponible para reservas</p>
+                        <p>{availability.motivo || 'El estudio se encuentra cerrado.'}</p>
+                      </div>
+                    ) : availability && availability.slots.length === 0 ? (
+                      <div className="p-6 bg-[#FAF7F2] border border-[#E8DCD5] rounded-2xl text-center text-xs text-[#7A6B62]">
+                        <p>No se encontraron turnos configurados para este día.</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-4 max-h-[300px] overflow-y-auto pr-1">
+                        
+                        {/* Morning */}
+                        {morningSlots.length > 0 && (
+                          <div>
+                            <span className="text-[11px] font-semibold text-[#8C7A70] uppercase tracking-wider block mb-2">
+                              Turnos Mañana
+                            </span>
+                            <div className="grid grid-cols-3 gap-2">
+                              {morningSlots.map((slot) => {
+                                const isSelected = selectedTime === slot.hora;
+                                return (
+                                  <button
+                                    key={slot.hora}
+                                    type="button"
+                                    disabled={!slot.disponible}
+                                    onClick={() => setSelectedTime(slot.hora)}
+                                    title={slot.motivo}
+                                    className={`py-2 px-1 rounded-xl text-xs font-medium transition-all text-center cursor-pointer ${
+                                      isSelected
+                                        ? 'bg-[#8E4455] text-white shadow-xs font-semibold ring-2 ring-[#8E4455]/30'
+                                        : slot.disponible
+                                        ? 'bg-[#FAF7F2] text-[#241E1A] border border-[#E8DCD5] hover:border-[#8E4455] hover:bg-white'
+                                        : 'bg-[#F5F2ED] text-[#A6978E] border border-transparent line-through cursor-not-allowed opacity-50'
+                                    }`}
+                                  >
+                                    {slot.hora} hs
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Afternoon */}
+                        {afternoonSlots.length > 0 && (
+                          <div>
+                            <span className="text-[11px] font-semibold text-[#8C7A70] uppercase tracking-wider block mb-2">
+                              Turnos Tarde
+                            </span>
+                            <div className="grid grid-cols-3 gap-2">
+                              {afternoonSlots.map((slot) => {
+                                const isSelected = selectedTime === slot.hora;
+                                return (
+                                  <button
+                                    key={slot.hora}
+                                    type="button"
+                                    disabled={!slot.disponible}
+                                    onClick={() => setSelectedTime(slot.hora)}
+                                    title={slot.motivo}
+                                    className={`py-2 px-1 rounded-xl text-xs font-medium transition-all text-center cursor-pointer ${
+                                      isSelected
+                                        ? 'bg-[#8E4455] text-white shadow-xs font-semibold ring-2 ring-[#8E4455]/30'
+                                        : slot.disponible
+                                        ? 'bg-[#FAF7F2] text-[#241E1A] border border-[#E8DCD5] hover:border-[#8E4455] hover:bg-white'
+                                        : 'bg-[#F5F2ED] text-[#A6978E] border border-transparent line-through cursor-not-allowed opacity-50'
+                                    }`}
+                                  >
+                                    {slot.hora} hs
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                      </div>
+                    )}
+
+                    {errors.time && (
+                      <p className="mt-3 text-xs text-rose-600 form-error-marker">{errors.time}</p>
+                    )}
+                  </div>
+
+                </div>
+              </div>
+
+              {/* STEP 3: Datos del Cliente */}
+              <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#E8DCD5] shadow-xs">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-8 h-8 rounded-full bg-[#8E4455] text-white flex items-center justify-center text-xs font-bold">
+                    3
+                  </div>
+                  <div>
+                    <h3 className="font-serif text-xl sm:text-2xl font-medium text-[#241E1A]">
+                      Tus Datos de Contacto
+                    </h3>
+                    <p className="text-xs text-[#7A6B62]">Te enviaremos el recordatorio de tu turno a tu WhatsApp.</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs font-medium text-[#4A3E39] mb-1.5">
+                      Nombre *
+                    </label>
+                    <div className="relative">
+                      <User className="w-4 h-4 text-[#8C7A70] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={nombre}
+                        onChange={(e) => setNombre(e.target.value)}
+                        placeholder="Ej: Camila"
+                        className={`w-full pl-10 pr-4 py-3 rounded-xl bg-[#FAF7F2] border text-sm text-[#241E1A] placeholder-[#A6978E] focus:outline-none focus:bg-white transition-all ${
+                          errors.nombre ? 'border-rose-400 bg-rose-50/30' : 'border-[#D9C9BF] focus:border-[#8E4455]'
+                        }`}
+                      />
+                    </div>
+                    {errors.nombre && <p className="mt-1 text-xs text-rose-600">{errors.nombre}</p>}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-[#4A3E39] mb-1.5">
+                      Apellido *
+                    </label>
+                    <div className="relative">
+                      <User className="w-4 h-4 text-[#8C7A70] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={apellido}
+                        onChange={(e) => setApellido(e.target.value)}
+                        placeholder="Ej: Valenzuela"
+                        className={`w-full pl-10 pr-4 py-3 rounded-xl bg-[#FAF7F2] border text-sm text-[#241E1A] placeholder-[#A6978E] focus:outline-none focus:bg-white transition-all ${
+                          errors.apellido ? 'border-rose-400 bg-rose-50/30' : 'border-[#D9C9BF] focus:border-[#8E4455]'
+                        }`}
+                      />
+                    </div>
+                    {errors.apellido && <p className="mt-1 text-xs text-rose-600">{errors.apellido}</p>}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs font-medium text-[#4A3E39] mb-1.5">
+                      Teléfono / WhatsApp *
+                    </label>
+                    <div className="relative">
+                      <Phone className="w-4 h-4 text-[#8C7A70] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="tel"
+                        value={telefono}
+                        onChange={(e) => setTelefono(e.target.value)}
+                        placeholder="Ej: 11-4521-8899 ó +54 9 11..."
+                        className={`w-full pl-10 pr-4 py-3 rounded-xl bg-[#FAF7F2] border text-sm text-[#241E1A] placeholder-[#A6978E] focus:outline-none focus:bg-white transition-all ${
+                          errors.telefono ? 'border-rose-400 bg-rose-50/30' : 'border-[#D9C9BF] focus:border-[#8E4455]'
+                        }`}
+                      />
+                    </div>
+                    {errors.telefono && <p className="mt-1 text-xs text-rose-600">{errors.telefono}</p>}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-[#4A3E39] mb-1.5">
+                      Email <span className="text-[#8C7A70] font-normal">(Opcional)</span>
+                    </label>
+                    <div className="relative">
+                      <Mail className="w-4 h-4 text-[#8C7A70] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="ejemplo@correo.com"
+                        className="w-full pl-10 pr-4 py-3 rounded-xl bg-[#FAF7F2] border border-[#D9C9BF] text-sm text-[#241E1A] placeholder-[#A6978E] focus:outline-none focus:border-[#8E4455] focus:bg-white transition-all"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="block text-xs font-medium text-[#4A3E39]">
+                      Detalles del diseño o trabajo deseado (Opcional)
+                    </label>
+                    <span className="text-[11px] text-[#8C7A70]">
+                      {observaciones.length}/150
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <FileText className="w-4 h-4 text-[#8C7A70] absolute left-3.5 top-3.5" />
+                    <textarea
+                      rows={2}
+                      maxLength={150}
+                      value={observaciones}
+                      onChange={(e) => setObservaciones(e.target.value)}
+                      placeholder="Ej: Soft gel largo medio almendrado, diseño vanilla chrome o retiro previo..."
+                      className="w-full pl-10 pr-4 py-3 rounded-xl bg-[#FAF7F2] border border-[#D9C9BF] text-sm text-[#241E1A] placeholder-[#A6978E] focus:outline-none focus:border-[#8E4455] focus:bg-white transition-all resize-none"
+                    />
+                  </div>
+                </div>
+
+              </div>
+
+            </div>
+
+            {/* Right Col: Live Summary Ticket Card */}
+            <div className="lg:col-span-4 sticky top-24 space-y-6">
+              
+              <div className="bg-white rounded-3xl p-6 sm:p-7 border-2 border-[#8E4455]/30 shadow-lg relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-32 h-32 bg-[#E8C5CE]/30 rounded-full blur-2xl pointer-events-none" />
+
+                <div className="flex items-center gap-2 mb-4">
+                  <Sparkles className="w-4 h-4 text-[#D4AF37]" />
+                  <span className="text-xs uppercase tracking-widest text-[#8E4455] font-semibold">
+                    Resumen de tu Turno
+                  </span>
+                </div>
+
+                <div className="space-y-4 pb-5 border-b border-[#E8DCD5]">
+                  <div>
+                    <span className="text-xs text-[#8C7A70] block">Servicio Seleccionado</span>
+                    <h4 className="font-serif text-xl font-medium text-[#241E1A]">
+                      {selectedService?.nombre || 'Seleccioná un servicio'}
+                    </h4>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="bg-[#FAF7F2] p-3 rounded-xl border border-[#E8DCD5]">
+                      <span className="text-[#8C7A70] block">Fecha</span>
+                      <span className="font-medium text-[#241E1A] block truncate">
+                        {selectedDate || 'No seleccionada'}
+                      </span>
+                    </div>
+
+                    <div className="bg-[#FAF7F2] p-3 rounded-xl border border-[#E8DCD5]">
+                      <span className="text-[#8C7A70] block">Horario</span>
+                      <span className="font-medium text-[#241E1A] block">
+                        {selectedTime ? `${selectedTime} hs` : 'A elegir'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {selectedTime && calculatedEndTime && (
+                    <div className="flex items-center justify-between text-xs text-[#5A4B43] bg-[#FAF7F2] px-3.5 py-2 rounded-lg border border-[#E8DCD5]">
+                      <span>Duración estimada:</span>
+                      <span className="font-medium text-[#241E1A]">
+                        {selectedTime} a {calculatedEndTime} hs ({selectedService?.duracionMinutos} min)
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Price total */}
+                <div className="pt-4 pb-6 flex items-baseline justify-between">
+                  <span className="text-sm font-medium text-[#4A3E39]">Total del Servicio:</span>
+                  <div className="text-right">
+                    <span className="font-serif text-3xl font-bold text-[#8E4455]">
+                      ${selectedService ? selectedService.precio.toLocaleString('es-AR') : '0'}
+                    </span>
+                    <span className="text-xs text-[#8C7A70] block">ARS · Abonás en el estudio</span>
+                  </div>
+                </div>
+
+                {/* Submit Error */}
+                {submitError && (
+                  <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{submitError}</span>
+                  </div>
+                )}
+
+                {/* Submit Button */}
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="w-full py-4 px-6 rounded-full bg-[#8E4455] text-white text-sm font-medium tracking-wide shadow-md hover:bg-[#783645] hover:shadow-lg active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Confirmando reserva...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-4 h-4" />
+                      <span>Reservar Mi Turno</span>
+                    </>
+                  )}
+                </button>
+
+                <p className="mt-4 text-[11px] text-[#7A6B62] text-center">
+                  🔒 Sin cobro previo. Podés abonar al finalizar con efectivo, transferencia o débito.
+                </p>
+
+              </div>
+
+              {/* Assistance Box */}
+              <div className="bg-[#FAF7F2] p-5 rounded-2xl border border-[#E8DCD5] text-xs text-[#5A4B43] flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-[#25D366]/20 text-[#128C7E] flex items-center justify-center shrink-0">
+                  <MessageCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="font-semibold text-[#241E1A]">¿Dudas con tu diseño o fecha?</p>
+                  <a
+                    href="https://wa.me/5491115682386"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[#8E4455] hover:underline font-medium"
+                  >
+                    Consultanos por WhatsApp directo →
+                  </a>
+                </div>
+              </div>
+
+            </div>
+
+          </form>
+        )}
+
+      </div>
+    </section>
+  );
+};

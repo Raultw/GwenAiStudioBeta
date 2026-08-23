@@ -1,0 +1,293 @@
+{
+  "services": [
+    {
+      "id": "1",
+      "nombre": "Manicura Clásica & Rusa",
+      "slug": "manicura-clasica",
+      "categoria": "cuidado",
+      "descripcion": "Limpieza profunda combinada, repujado y corte prolijo de cutículas, limado y nutrición para manos impecables.",
+      "duracionMinutos": 45,
+      "precio": 14000,
+      "esPopular": false,
+      "icono": "💅",
+      "detalles": [
+        "Técnica rusa combinada",
+        "Nutrición profunda con aceites orgánicos",
+        "Esmaltado tradicional o brillo protector",
+        "Exfoliación suave de manos"
+      ],
+      "activo": true
+    },
+    {
+      "id": "2",
+      "nombre": "Esmaltado Semipermanente",
+      "slug": "semipermanente",
+      "categoria": "esmaltado",
+      "descripcion": "Color brillante y de alta adherencia que se mantiene intacto por 2 a 3 semanas. Gran variedad de tonos de temporada.",
+      "duracionMinutos": 60,
+      "precio": 18000,
+      "esPopular": false,
+      "icono": "✨",
+      "detalles": [
+        "Preparación rusa de cutículas",
+        "Capa base niveladora fortalecedora",
+        "Más de 80 tonos premium disponibles",
+        "Top coat ultra brillante o mate satinado"
+      ],
+      "activo": true
+    },
+    {
+      "id": "3",
+      "nombre": "Soft Gel System",
+      "slug": "soft-gel",
+      "categoria": "esculpidas",
+      "descripcion": "Extensiones ultralivianas de gel que cuidan tu uña natural con máxima resistencia y flexibilidad. El método estrella.",
+      "duracionMinutos": 90,
+      "precio": 26000,
+      "esPopular": true,
+      "icono": "🌸",
+      "detalles": [
+        "Tip completo 100% soak-off gel",
+        "Largo y forma a elección (Almond, Coffin, Square, Stiletto)",
+        "Durabilidad de 3 a 4 semanas sin levantamientos",
+        "Incluye esmaltado liso a elección"
+      ],
+      "activo": true
+    },
+    {
+      "id": "4",
+      "nombre": "Kapping Gel Fortalecedor",
+      "slug": "kapping",
+      "categoria": "cuidado",
+      "descripcion": "Fino recubrimiento en gel o acrigel sobre la uña natural para evitar quiebres y permitir que crezca fuerte y sana.",
+      "duracionMinutos": 75,
+      "precio": 22000,
+      "esPopular": false,
+      "icono": "💎",
+      "detalles": [
+        "Ideal para uñas frágiles, quebradizas o escamadas",
+        "Nivelación y arquitectura perfecta",
+        "Refuerzo estructural sin grosor excesivo",
+        "Incluye esmaltado semipermanente"
+      ],
+      "activo": true
+    },
+    {
+      "id": "5",
+      "nombre": "Nail Art & Diseños Exclusivos",
+      "slug": "nail-art",
+      "categoria": "arte",
+      "descripcion": "Creaciones artísticas a mano alzada, efectos chrome, foil dorado, degradados aura, flores y pedrería fina.",
+      "duracionMinutos": 90,
+      "precio": 25000,
+      "esPopular": true,
+      "icono": "🎨",
+      "detalles": [
+        "Mano alzada personalizada",
+        "Tendencias: Chrome, Glazed Donut, Aura, French 3D",
+        "Aplicación de foil, microbrillos y cristalería",
+        "Asesoramiento estético personalizado"
+      ],
+      "activo": true
+    },
+    {
+      "id": "6",
+      "nombre": "Esculpidas en Polygel / Acrílico",
+      "slug": "esculpidas",
+      "categoria": "esculpidas",
+      "descripcion": "Construcción escultural con molde milimétrico para formas impecables, resistencia superior y máximo detalle.",
+      "duracionMinutos": 120,
+      "precio": 32000,
+      "esPopular": false,
+      "icono": "👑",
+      "detalles": [
+        "Estructura personalizada con moldes",
+        "Control de apex y curva C perfecta",
+        "Máxima resistencia para uñas exigentes",
+        "Incluye esmaltado semipermanente"
+      ],
+      "activo": true
+    },
+    {
+      "id": "7",
+      "nombre": "Retiro Seguro & Tratamiento",
+      "slug": "retiro",
+      "categoria": "cuidado",
+      "descripcion": "Remoción profesional no invasiva mediante torno de precisión o método soak-off, preservando la placa ungueal.",
+      "duracionMinutos": 45,
+      "precio": 10000,
+      "esPopular": false,
+      "icono": "🔄",
+      "detalles": [
+        "Retiro suave sin dañar las capas de la uña",
+        "Tratamiento de queratina y calcio",
+        "Pulido y sellado nutritivo",
+        "Recomendado para descansos o cambio de técnica"
+      ],
+      "activo": true
+    }
+  ],
+  "appointments": [
+    {
+      "id": "apt-1787324976705-715",
+      "codigo": "GWEN-3677",
+      "nombre": "Valeria",
+      "apellido": "Rossi",
+      "telefono": "1199887766",
+      "servicioId": "3",
+      "servicioNombre": "Soft Gel System",
+      "duracionMinutos": 90,
+      "precio": 26000,
+      "fecha": "2026-08-25",
+      "horaInicio": "14:00",
+      "horaFin": "15:30",
+      "observaciones": "Prueba Soft Gel",
+      "estado": "confirmado",
+      "createdAt": "2026-08-21T15:09:36.705Z",
+      "updatedAt": "2026-08-21T15:09:36.705Z"
+    },
+    {
+      "id": "apt-1787322960015-395",
+      "codigo": "GWEN-6953",
+      "nombre": "Luciana",
+      "apellido": "García",
+      "telefono": "11-9876-5432",
+      "servicioId": "3",
+      "servicioNombre": "Soft Gel System",
+      "duracionMinutos": 90,
+      "precio": 26000,
+      "fecha": "2026-08-25",
+      "horaInicio": "10:00",
+      "horaFin": "11:30",
+      "observaciones": "Soft gel almendrado",
+      "estado": "confirmado",
+      "createdAt": "2026-08-21T14:36:00.015Z",
+      "updatedAt": "2026-08-21T14:36:00.015Z"
+    },
+    {
+      "id": "apt-1",
+      "codigo": "GWEN-4821",
+      "nombre": "Camila",
+      "apellido": "Valenzuela",
+      "telefono": "11-4521-8899",
+      "email": "camila.v@gmail.com",
+      "servicioId": "3",
+      "servicioNombre": "Soft Gel System",
+      "duracionMinutos": 90,
+      "precio": 26000,
+      "fecha": "2026-08-21",
+      "horaInicio": "10:00",
+      "horaFin": "11:30",
+      "observaciones": "Diseño almendrado con foil oro",
+      "estado": "confirmado",
+      "createdAt": "2026-08-19T14:35:53.378Z",
+      "updatedAt": "2026-08-20T14:35:53.379Z",
+      "notasAdmin": "Clienta habitual. Prefiere base tono nude claro."
+    },
+    {
+      "id": "apt-2",
+      "codigo": "GWEN-5912",
+      "nombre": "Florencia",
+      "apellido": "Méndez",
+      "telefono": "11-6677-4433",
+      "servicioId": "2",
+      "servicioNombre": "Esmaltado Semipermanente",
+      "duracionMinutos": 60,
+      "precio": 18000,
+      "fecha": "2026-08-21",
+      "horaInicio": "14:30",
+      "horaFin": "15:30",
+      "observaciones": "Color cherry red / bordeaux",
+      "estado": "pendiente",
+      "createdAt": "2026-08-21T14:35:53.379Z",
+      "updatedAt": "2026-08-21T14:35:53.379Z"
+    },
+    {
+      "id": "apt-3",
+      "codigo": "GWEN-6240",
+      "nombre": "Julieta",
+      "apellido": "Pérez",
+      "telefono": "11-3322-1100",
+      "servicioId": "5",
+      "servicioNombre": "Nail Art & Diseños Exclusivos",
+      "duracionMinutos": 90,
+      "precio": 25000,
+      "fecha": "2026-08-22",
+      "horaInicio": "11:00",
+      "horaFin": "12:30",
+      "observaciones": "Vanilla Chrome + micro flores",
+      "estado": "confirmado",
+      "createdAt": "2026-08-21T14:35:53.379Z",
+      "updatedAt": "2026-08-21T14:35:53.379Z"
+    },
+    {
+      "id": "apt-4",
+      "codigo": "GWEN-7719",
+      "nombre": "Martina",
+      "apellido": "Suárez",
+      "telefono": "11-8899-2211",
+      "servicioId": "4",
+      "servicioNombre": "Kapping Gel Fortalecedor",
+      "duracionMinutos": 75,
+      "precio": 22000,
+      "fecha": "2026-08-23",
+      "horaInicio": "16:00",
+      "horaFin": "17:15",
+      "observaciones": "Uñas frágiles post acrílico",
+      "estado": "confirmado",
+      "createdAt": "2026-08-21T14:35:53.379Z",
+      "updatedAt": "2026-08-21T14:35:53.379Z"
+    }
+  ],
+  "config": {
+    "nombreEstudio": "Gwen Nails Studio",
+    "subtitulo": "Donde tus manos cuentan tu historia",
+    "direccion": "Gorriti 5540, Palermo Hollywood, CABA",
+    "telefono": "011-15682386",
+    "whatsapp": "5491115682386",
+    "instagram": "gwennails",
+    "email": "contacto@gwennails.com",
+    "horariosPorDia": {
+      "lunes": {
+        "activo": true,
+        "apertura": "09:00",
+        "cierre": "19:00"
+      },
+      "martes": {
+        "activo": true,
+        "apertura": "09:00",
+        "cierre": "19:00"
+      },
+      "miercoles": {
+        "activo": true,
+        "apertura": "09:00",
+        "cierre": "19:00"
+      },
+      "jueves": {
+        "activo": true,
+        "apertura": "09:00",
+        "cierre": "19:00"
+      },
+      "viernes": {
+        "activo": true,
+        "apertura": "09:00",
+        "cierre": "19:00"
+      },
+      "sabado": {
+        "activo": true,
+        "apertura": "09:00",
+        "cierre": "17:00"
+      },
+      "domingo": {
+        "activo": false,
+        "apertura": "10:00",
+        "cierre": "14:00"
+      }
+    },
+    "intervaloMinutos": 30,
+    "bufferMinutos": 0,
+    "diasBloqueados": [],
+    "horariosBloqueados": {},
+    "pinAdmin": "1234"
+  }
+}

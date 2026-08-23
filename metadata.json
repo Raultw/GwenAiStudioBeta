@@ -1,0 +1,6 @@
+{
+  "name": "Gwen Nails - Sistema de Turnos",
+  "description": "Sitio web oficial y sistema integral de reservas de turnos para Gwen Nails Studio con gestión de disponibilidad en tiempo real y panel de administración.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
