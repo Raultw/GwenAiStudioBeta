@@ -75,6 +75,32 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
     confirmBtnColor: string;
   } | null>(null);
 
+  const formatClienteDesdeDate = (iso?: string) => {
+    if (!iso) return '';
+    try {
+      const dateOnly = iso.split('T')[0];
+      const [y, m, d] = dateOnly.split('-');
+      if (y && m && d) {
+        const dateObj = new Date(Number(y), Number(m) - 1, Number(d));
+        if (!isNaN(dateObj.getTime())) {
+          return dateObj.toLocaleDateString('es-AR', { day: 'numeric', month: 'long', year: 'numeric' });
+        }
+        return `${d}/${m}/${y}`;
+      }
+    } catch (e) {
+      // fallback
+    }
+    return iso;
+  };
+
+  const formatDateFriendly = (iso?: string) => {
+    if (!iso) return '';
+    const datePart = iso.split('T')[0];
+    const [y, m, d] = datePart.split('-');
+    if (!y || !m || !d) return iso;
+    return `${d}/${m}/${y}`;
+  };
+
   // Reset & load client data whenever the appointment changes
   useEffect(() => {
     if (!isOpen || !appointment) {
@@ -342,6 +368,12 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                     <span className="flex items-center gap-1">
                       <Mail className="w-3.5 h-3.5 text-[#8C7A70]" />
                       {appointment.email}
+                    </span>
+                  )}
+                  {clientProfile?.client.fechaAlta && (
+                    <span className="flex items-center gap-1 font-medium text-[#8E4455] bg-rose-50 px-2 py-0.5 rounded-md border border-rose-200" title="Fecha de alta del cliente">
+                      <Calendar className="w-3.5 h-3.5" />
+                      <span>Cliente desde {formatClienteDesdeDate(clientProfile.client.fechaAlta)}</span>
                     </span>
                   )}
                 </div>

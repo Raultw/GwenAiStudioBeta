@@ -286,7 +286,8 @@ export const defaultStudioConfig: StudioConfig = {
   horariosBloqueados: {},
   bloqueosDetallados: [],
   pinAdmin: "1234",
-  diasInactividadCliente: 60
+  diasInactividadCliente: 60,
+  minTurnosRecurrente: 2
 };
 
 // In-Memory & Local File Fallback Engine
@@ -421,6 +422,13 @@ if (connectionString) {
  * If not connected, initializes the local fallback database.
  */
 export async function initDatabase() {
+  const isProd = process.env.NODE_ENV === 'production';
+  if (!connectionString && isProd) {
+    const errMsg = 'ERROR CRÍTICO: DATABASE_URL es obligatoria en entorno de producción. El fallback JSON no está permitido en producción.';
+    console.error(errMsg);
+    throw new Error(errMsg);
+  }
+
   if (pgPool) {
     try {
       console.log('🐘 Connecting to PostgreSQL database...');
@@ -775,11 +783,22 @@ export async function initDatabase() {
         client.release();
       }
     } catch (err) {
-      console.error('⚠️ Could not connect to PostgreSQL, falling back to local storage:', err);
+      console.error('❌ Could not connect to PostgreSQL:', err);
+      if (isProd) {
+        const errMsg = 'ERROR CRÍTICO EN PRODUCCIÓN: PostgreSQL no está disponible y el fallback JSON está prohibido en producción.';
+        console.error(errMsg);
+        throw new Error(errMsg);
+      }
+      console.warn('⚠️ Could not connect to PostgreSQL, falling back to local storage (Development mode):', err);
       isPostgresConnected = false;
       loadLocalFileDb();
     }
   } else {
+    if (isProd) {
+      const errMsg = 'ERROR CRÍTICO: No se pudo configurar el pool de PostgreSQL en producción.';
+      console.error(errMsg);
+      throw new Error(errMsg);
+    }
     console.log('📁 No DATABASE_URL specified. Running with local filesystem storage.');
     loadLocalFileDb();
   }
@@ -872,27 +891,40 @@ export async function getClients(filter?: {
         conditions.push(`activo = true`);
       }
 
-      if (filter?.search) {
-        const qNorm = normalizeText(filter.search);
+      if (filter?.search && filter.search.trim().length > 0) {
+        const qClean = filter.search.trim().toLowerCase();
+        const qNorm = normalizeText(filter.search.trim());
         const qPhone = filter.search.replace(/\D/g, '');
-        values.push(`%${filter.search.toLowerCase()}%`);
-        values.push(`%${qNorm}%`);
-        values.push(`%${qPhone}%`);
+
+        values.push(`%${qClean}%`); // $1
+        values.push(`%${qNorm}%`);  // $2
         
-        conditions.push(`(
-          LOWER(nombre) LIKE $1 OR
-          LOWER(apellido) LIKE $1 OR
-          LOWER(COALESCE(email, '')) LIKE $1 OR
-          telefono LIKE $1 OR
-          nombre_normalizado LIKE $2 OR
-          apellido_normalizado LIKE $2 OR
-          telefono_normalizado LIKE $3
-        )`);
+        if (qPhone.length >= 3) {
+          values.push(`%${qPhone}%`); // $3
+          conditions.push(`(
+            LOWER(nombre) LIKE $1 OR
+            LOWER(apellido) LIKE $1 OR
+            LOWER(COALESCE(email, '')) LIKE $1 OR
+            telefono LIKE $1 OR
+            nombre_normalizado LIKE $2 OR
+            apellido_normalizado LIKE $2 OR
+            telefono_normalizado LIKE $3
+          )`);
+        } else {
+          conditions.push(`(
+            LOWER(nombre) LIKE $1 OR
+            LOWER(apellido) LIKE $1 OR
+            LOWER(COALESCE(email, '')) LIKE $1 OR
+            telefono LIKE $1 OR
+            nombre_normalizado LIKE $2 OR
+            apellido_normalizado LIKE $2
+          )`);
+        }
       }
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
       const query = `SELECT * FROM clients ${whereClause} ORDER BY created_at DESC`;
-      const res = await pgPool.query(query, values.length > 0 ? [values[0], values[1], values[2]] : []);
+      const res = await pgPool.query(query, values);
 
       rawClients = res.rows.map(row => ({
         id: row.id,
@@ -927,15 +959,15 @@ export async function getClients(filter?: {
     }
   }
 
-  // Enrich with appointment stats
-  const allAppointments = await getAppointments();
   const studioConfig = await getStudioConfig();
   const diasInactividad = studioConfig.diasInactividadCliente || 60;
+  const minRecurrente = studioConfig.minTurnosRecurrente || 2;
   const todayStr = new Date().toISOString().split('T')[0];
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const inactivityDaysAgo = new Date(Date.now() - diasInactividad * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
   const allActiveAlerts = await getClientAlerts(undefined, true);
+  const allAppointments = await getAppointments();
 
   const enrichedClients = rawClients.map(client => {
     const clientApts = allAppointments.filter(a =>
@@ -988,7 +1020,7 @@ export async function getClients(filter?: {
   let result = enrichedClients;
   if (filter?.category && filter.category !== 'todos') {
     if (filter.category === 'recurrentes') {
-      result = result.filter(c => (c.totalTurnos || 0) >= 2);
+      result = result.filter(c => (c.totalTurnos || 0) >= minRecurrente);
     } else if (filter.category === 'nuevos') {
       result = result.filter(c => c.fechaAlta >= thirtyDaysAgo || (c.primerTurnoFecha && c.primerTurnoFecha >= thirtyDaysAgo));
     } else if (filter.category === 'inactivos') {
@@ -1000,18 +1032,20 @@ export async function getClients(filter?: {
     }
   }
 
-  if (filter?.search && (!isPostgresConnected || !pgPool)) {
-    const q = filter.search.toLowerCase();
-    const qNorm = normalizeText(filter.search);
-    result = result.filter(c =>
-      c.nombre.toLowerCase().includes(q) ||
-      c.apellido.toLowerCase().includes(q) ||
-      c.telefono.includes(q) ||
-      (c.email && c.email.toLowerCase().includes(q)) ||
-      c.nombreNormalizado.includes(qNorm) ||
-      c.apellidoNormalizado.includes(qNorm) ||
-      (c.notasAdmin && c.notasAdmin.toLowerCase().includes(q))
-    );
+  if (filter?.search && filter.search.trim().length > 0 && (!isPostgresConnected || !pgPool)) {
+    const q = filter.search.toLowerCase().trim();
+    const qNorm = normalizeText(filter.search.trim());
+    const qPhone = filter.search.replace(/\D/g, '');
+    result = result.filter(c => {
+      const matchName = c.nombre.toLowerCase().includes(q) || c.nombreNormalizado.includes(qNorm);
+      const matchApellido = c.apellido.toLowerCase().includes(q) || c.apellidoNormalizado.includes(qNorm);
+      const matchFullName = `${c.nombre.toLowerCase()} ${c.apellido.toLowerCase()}`.includes(q) ||
+                            `${c.nombreNormalizado} ${c.apellidoNormalizado}`.includes(qNorm);
+      const matchEmail = Boolean(c.email && c.email.toLowerCase().includes(q));
+      const matchPhone = c.telefono.includes(q) || (qPhone.length >= 3 && c.telefonoNormalizado.includes(qPhone));
+      const matchNotas = Boolean(c.notasAdmin && c.notasAdmin.toLowerCase().includes(q));
+      return matchName || matchApellido || matchFullName || matchEmail || matchPhone || matchNotas;
+    });
   }
 
   return result;
@@ -1469,12 +1503,13 @@ export async function getClientStats(): Promise<ClientStats> {
   const duplicates = await getPotentialDuplicatePairs();
   const studioConfig = await getStudioConfig();
   const diasInactividad = studioConfig.diasInactividadCliente || 60;
+  const minRecurrente = studioConfig.minTurnosRecurrente || 2;
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const inactivityDaysAgo = new Date(Date.now() - diasInactividad * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
   const totalClientes = clients.length;
   const clientesNuevos = clients.filter(c => c.fechaAlta >= thirtyDaysAgo || (c.primerTurnoFecha && c.primerTurnoFecha >= thirtyDaysAgo)).length;
-  const clientesRecurrentes = clients.filter(c => (c.totalTurnos || 0) >= 2).length;
+  const clientesRecurrentes = clients.filter(c => (c.totalTurnos || 0) >= minRecurrente).length;
   const clientesInactivos = clients.filter(c => !c.fechaUltimaVisita || c.fechaUltimaVisita < inactivityDaysAgo).length;
   const clientesConProximosTurnos = clients.filter(c => Boolean(c.proximoTurno)).length;
 
@@ -2082,8 +2117,28 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
   }
 
   if (isPostgresConnected && pgPool) {
+    const client = await pgPool.connect();
     try {
-      await pgPool.query(`
+      await client.query('BEGIN');
+
+      // Concurrency check within transaction using table lock or explicit check for overlap
+      if (apt.profesionalId) {
+        const overlapRes = await client.query(`
+          SELECT id FROM appointments
+          WHERE profesional_id = $1 
+            AND fecha = $2 
+            AND estado != 'cancelado'
+            AND NOT (hora_fin <= $3 OR hora_inicio >= $4)
+          FOR UPDATE
+        `, [apt.profesionalId, apt.fecha, apt.horaInicio, apt.horaFin]);
+
+        if (overlapRes.rows.length > 0) {
+          await client.query('ROLLBACK');
+          throw new Error('El horario seleccionado ya ha sido reservado por otra solicitud simultánea. Por favor elegí otro horario.');
+        }
+      }
+
+      await client.query(`
         INSERT INTO appointments (
           id, cliente_id, profesional_id, profesional_nombre, codigo, nombre, apellido, telefono, email,
           servicio_id, servicio_nombre, duracion_minutos, precio,
@@ -2112,9 +2167,28 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
         apt.notasAdmin || null,
         apt.browserId || null
       ]);
+
+      await client.query('COMMIT');
       return apt;
-    } catch (err) {
-      console.error('Error saving appointment to PostgreSQL:', err);
+    } catch (err: any) {
+      try { await client.query('ROLLBACK'); } catch (rbErr) {}
+      console.error('Error saving appointment to PostgreSQL (transaction/concurrency):', err);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Fallback in-memory check for double booking in development
+  if (apt.profesionalId) {
+    const existingOverlap = memoryDb.appointments.find(a =>
+      a.profesionalId === apt.profesionalId &&
+      a.fecha === apt.fecha &&
+      a.estado !== 'cancelado' &&
+      !(a.horaFin <= apt.horaInicio || a.horaInicio >= apt.horaFin)
+    );
+    if (existingOverlap) {
+      throw new Error('El horario seleccionado ya ha sido reservado por otra solicitud simultánea. Por favor elegí otro horario.');
     }
   }
 

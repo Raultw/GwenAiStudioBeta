@@ -30,12 +30,36 @@ interface AvailabilityExceptionsAdminProps {
   onRefreshData?: () => void;
 }
 
+interface CoverageModalData {
+  fecha: string;
+  isStudioClosed: boolean;
+  profNames: string[];
+  profIntervalos: TimeInterval[];
+  studioIntervals: TimeInterval[];
+  uncoveredIntervals: TimeInterval[];
+  requiredStudioIntervals: TimeInterval[];
+  studioDesc: string;
+  profDesc: string;
+}
+
 const getTodayIso = () => {
   const d = new Date();
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+};
+
+const formatDateFriendly = (isoDate: string) => {
+  if (!isoDate || !isoDate.includes('-')) return isoDate;
+  const [y, m, d] = isoDate.split('-').map(Number);
+  const dateObj = new Date(y, m - 1, d);
+  const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+  const monthNames = [
+    'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+  ];
+  return `${dayNames[dateObj.getDay()]}, ${d} de ${monthNames[m - 1]} de ${y}`;
 };
 
 export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminProps> = ({
@@ -45,6 +69,7 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
   const [exceptions, setExceptions] = useState<AvailabilityException[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [isExtendingStudio, setIsExtendingStudio] = useState<boolean>(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -55,18 +80,12 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
   const [formSelectedProfIds, setFormSelectedProfIds] = useState<string[]>([]);
   const [formTipo, setFormTipo] = useState<AvailabilityExceptionType>('horario_especial');
   const [formIntervalos, setFormIntervalos] = useState<TimeInterval[]>([
-    { inicio: '09:00', fin: '20:00' }
+    { inicio: '09:00', fin: '19:00' }
   ]);
   const [formMotivo, setFormMotivo] = useState<string>('');
 
-  // Coverage check assistant state
-  const [coverageCheck, setCoverageCheck] = useState<{
-    covered: boolean;
-    missingIntervals?: TimeInterval[];
-    reason?: string;
-  } | null>(null);
-  const [isCheckingCoverage, setIsCheckingCoverage] = useState<boolean>(false);
-  const [isExtendingStudio, setIsExtendingStudio] = useState<boolean>(false);
+  // Cartel / Modal state when professional exception exceeds studio schedule
+  const [coverageModalData, setCoverageModalData] = useState<CoverageModalData | null>(null);
 
   // Load exceptions
   const loadExceptions = async () => {
@@ -110,52 +129,6 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
     return { upcomingExceptions: upcoming, pastExceptions: past };
   }, [exceptions, today]);
 
-  // Live Studio Coverage Checker when editing a professional exception
-  useEffect(() => {
-    if (!isFormOpen || formAlcance !== 'profesional' || formTipo === 'cerrado' || !formFecha) {
-      setCoverageCheck(null);
-      return;
-    }
-
-    // Verify if formIntervalos are non-empty and valid
-    const validIntervals = formIntervalos.filter(i => i.inicio && i.fin && i.inicio < i.fin);
-    if (validIntervals.length === 0) {
-      setCoverageCheck(null);
-      return;
-    }
-
-    let isMounted = true;
-    setIsCheckingCoverage(true);
-
-    const checkCoverage = async () => {
-      try {
-        const res = await fetch('/api/excepciones-disponibilidad/check-cobertura', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fecha: formFecha,
-            profesionalIntervalos: validIntervals
-          })
-        });
-
-        if (res.ok && isMounted) {
-          const result = await res.json();
-          setCoverageCheck(result);
-        }
-      } catch (err) {
-        console.error('Error checking studio coverage:', err);
-      } finally {
-        if (isMounted) setIsCheckingCoverage(false);
-      }
-    };
-
-    const timer = setTimeout(checkCoverage, 300);
-    return () => {
-      isMounted = false;
-      clearTimeout(timer);
-    };
-  }, [isFormOpen, formAlcance, formTipo, formFecha, formIntervalos]);
-
   // Interval handlers
   const handleAddInterval = () => {
     setFormIntervalos(prev => {
@@ -190,39 +163,39 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
     setFormSelectedProfIds([]);
   };
 
-  // Auto-extend Studio Schedule Helper
-  const handleAutoExtendStudio = async () => {
-    if (!formFecha || !coverageCheck?.missingIntervals || coverageCheck.missingIntervals.length === 0) return;
-    setIsExtendingStudio(true);
-    try {
-      const res = await fetch('/api/excepciones-disponibilidad/auto-extender-local', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fecha: formFecha,
-          requiredIntervals: formIntervalos,
-          motivo: `Extensión automática del local para cubrir atención especial de profesionales (${formMotivo || 'Excepción especial'})`
-        })
-      });
+  // Internal Save Execution
+  const executeSaveException = async () => {
+    const payload = {
+      alcance: formAlcance,
+      profesionalId: formAlcance === 'profesional' && formSelectedProfIds.length === 1 ? formSelectedProfIds[0] : undefined,
+      profesionalIds: formAlcance === 'profesional' ? formSelectedProfIds : undefined,
+      fecha: formFecha,
+      tipo: formTipo,
+      intervalos: formTipo === 'horario_especial' ? formIntervalos : [],
+      motivo: formMotivo.trim() || undefined
+    };
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Error al extender el horario del local');
-      }
+    const res = await fetch('/api/excepciones-disponibilidad', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
 
-      setSuccessMsg(`¡Horario del local extendido automáticamente para el ${formFecha}! Ahora cubre la jornada de los profesionales.`);
-      setTimeout(() => setSuccessMsg(null), 5000);
-      setCoverageCheck({ covered: true });
-      await loadExceptions();
-    } catch (err: any) {
-      console.error('Error auto-extending studio schedule:', err);
-      setErrorMsg(err.message || 'No se pudo extender el horario del local automáticamente.');
-    } finally {
-      setIsExtendingStudio(false);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Error al registrar la excepción.');
     }
+
+    setSuccessMsg(`¡Excepción de disponibilidad para el ${formFecha} guardada con éxito!`);
+    setTimeout(() => setSuccessMsg(null), 5000);
+    setIsFormOpen(false);
+    setFormMotivo('');
+    setFormSelectedProfIds([]);
+    await loadExceptions();
+    if (onRefreshData) onRefreshData();
   };
 
-  // Submit Exception
+  // Submit Exception Handler
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -256,41 +229,95 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
     }
 
     setIsSubmitting(true);
+
     try {
-      const payload = {
-        alcance: formAlcance,
-        profesionalId: formAlcance === 'profesional' && formSelectedProfIds.length === 1 ? formSelectedProfIds[0] : undefined,
-        profesionalIds: formAlcance === 'profesional' ? formSelectedProfIds : undefined,
-        fecha: formFecha,
-        tipo: formTipo,
-        intervalos: formTipo === 'horario_especial' ? formIntervalos : [],
-        motivo: formMotivo.trim() || undefined
-      };
+      // If configuring special hours for professionals, check coverage against studio schedule
+      if (formAlcance === 'profesional' && formTipo === 'horario_especial') {
+        const checkRes = await fetch('/api/excepciones-disponibilidad/check-cobertura', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fecha: formFecha,
+            profesionalIntervalos: formIntervalos
+          })
+        });
 
-      const res = await fetch('/api/excepciones-disponibilidad', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+        if (checkRes.ok) {
+          const checkData = await checkRes.json();
+          if (checkData.exceedsStudio) {
+            // Show Cartel / Modal with detailed list of exceeded intervals
+            const selectedNames = professionals
+              .filter(p => formSelectedProfIds.includes(p.id))
+              .map(p => `${p.nombre} ${p.apellido}`);
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Error al registrar la excepción.');
+            setCoverageModalData({
+              fecha: formFecha,
+              isStudioClosed: checkData.isStudioClosed,
+              profNames: selectedNames,
+              profIntervalos: formIntervalos,
+              studioIntervals: checkData.studioEffectiveIntervals || [],
+              uncoveredIntervals: checkData.uncoveredIntervals || [],
+              requiredStudioIntervals: checkData.requiredStudioIntervals || formIntervalos,
+              studioDesc: checkData.studioScheduleDescription || 'Cerrado',
+              profDesc: checkData.professionalScheduleDescription || ''
+            });
+            setIsSubmitting(false);
+            return;
+          }
+        }
       }
 
-      setSuccessMsg(`¡Excepción de disponibilidad para el ${formFecha} registrada con éxito!`);
-      setTimeout(() => setSuccessMsg(null), 5000);
-      setIsFormOpen(false);
-      setFormMotivo('');
-      setFormSelectedProfIds([]);
-      await loadExceptions();
-      if (onRefreshData) onRefreshData();
+      // If coverage is fine or alcance is local/cerrado, save directly
+      await executeSaveException();
     } catch (err: any) {
       console.error('Error creating availability exception:', err);
       setErrorMsg(err.message || 'Error al guardar la excepción de disponibilidad.');
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  // Modal Action: Auto extend studio and save professional exception together
+  const handleConfirmExtendStudioAndSave = async () => {
+    if (!coverageModalData) return;
+    setIsExtendingStudio(true);
+    setErrorMsg(null);
+
+    try {
+      // 1. Extend Studio Schedule as an exception for this date
+      const extRes = await fetch('/api/excepciones-disponibilidad/auto-extender-local', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fecha: coverageModalData.fecha,
+          requiredIntervals: coverageModalData.requiredStudioIntervals,
+          motivo: `Apertura extendida del salón para cubrir atención de profesionales (${formMotivo || 'Excepción especial'})`
+        })
+      });
+
+      if (!extRes.ok) {
+        const data = await extRes.json().catch(() => ({}));
+        throw new Error(data.error || 'Error al extender el horario del salón.');
+      }
+
+      // 2. Save the Professional Exception
+      await executeSaveException();
+
+      // 3. Close modal and show compound success message
+      setCoverageModalData(null);
+      setSuccessMsg(`¡Horario del salón extendido y excepción de disponibilidad guardada con éxito para el ${coverageModalData.fecha}!`);
+      setTimeout(() => setSuccessMsg(null), 6000);
+    } catch (err: any) {
+      console.error('Error extending studio and saving professional exception:', err);
+      setErrorMsg(err.message || 'No se pudo completar la operación.');
+    } finally {
+      setIsExtendingStudio(false);
+    }
+  };
+
+  // Modal Action: Cancel without applying any changes
+  const handleCancelCoverageModal = () => {
+    setCoverageModalData(null);
   };
 
   // Delete Exception
@@ -621,47 +648,6 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
               </div>
             )}
 
-            {/* Asistente al extender horario del local */}
-            {coverageCheck && !coverageCheck.covered && (
-              <div className="bg-amber-50 p-5 rounded-2xl border border-amber-200 text-amber-900 space-y-3 animate-in fade-in duration-200">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <h5 className="font-serif font-bold text-sm text-amber-950">
-                      El horario seleccionado supera el horario de atención del local
-                    </h5>
-                    <p className="text-xs text-amber-800 mt-0.5">
-                      {coverageCheck.reason || 'El horario habitual del salón para esa fecha no cubre todos los tramos configurados para las profesionales.'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2 border-t border-amber-200/80">
-                  <span className="text-[11px] text-amber-800">
-                    ¿Deseás extender el horario del salón automáticamente para este día puntual?
-                  </span>
-                  <button
-                    type="button"
-                    disabled={isExtendingStudio}
-                    onClick={handleAutoExtendStudio}
-                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shadow-2xs transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
-                  >
-                    {isExtendingStudio ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        <span>Extendiendo Salón...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-3.5 h-3.5" />
-                        <span>Extender horario del local</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
-
             {/* Motivo */}
             <div className="space-y-1.5">
               <label className="block text-xs font-semibold text-[#241E1A]">
@@ -693,7 +679,7 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
                 {isSubmitting ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Guardando...</span>
+                    <span>Verificando y Guardando...</span>
                   </>
                 ) : (
                   <>
@@ -704,6 +690,140 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* MODAL / CARTEL: ADVERTENCIA DE HORARIO EXCEDIDO DEL SALÓN */}
+      {coverageModalData && (
+        <div
+          id="modal-cobertura-salon"
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div className="bg-white rounded-3xl border border-[#E8DCD5] shadow-2xl max-w-lg w-full p-6 sm:p-7 space-y-5 animate-in fade-in zoom-in-95 duration-150 my-auto">
+            {/* Header */}
+            <div className="flex items-start gap-3.5">
+              <div className="w-10 h-10 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="font-serif font-bold text-lg text-[#241E1A] leading-snug">
+                  El horario seleccionado supera el horario del salón
+                </h3>
+                <p className="text-xs text-[#7A6B62]">
+                  Para que las profesionales atiendan en este día y horario, el salón también necesita registrar una excepción de apertura.
+                </p>
+              </div>
+            </div>
+
+            {/* Details Box */}
+            <div className="bg-[#FAF7F2] p-4 rounded-2xl border border-[#E8DCD5] space-y-3 text-xs">
+              <div className="flex items-center justify-between py-1 border-b border-[#E8DCD5]/70">
+                <span className="text-[#7A6B62] font-medium">Fecha:</span>
+                <span className="font-semibold text-[#241E1A] capitalize">
+                  {formatDateFriendly(coverageModalData.fecha)}
+                </span>
+              </div>
+
+              {coverageModalData.profNames.length > 0 && (
+                <div className="flex items-start justify-between py-1 border-b border-[#E8DCD5]/70">
+                  <span className="text-[#7A6B62] font-medium shrink-0">Profesionales:</span>
+                  <span className="font-semibold text-[#241E1A] text-right">
+                    {coverageModalData.profNames.join(', ')}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-start justify-between py-1 border-b border-[#E8DCD5]/70">
+                <span className="text-[#7A6B62] font-medium shrink-0">Horario de profesionales:</span>
+                <span className="font-mono font-semibold text-[#8E4455] text-right">
+                  {coverageModalData.profDesc}
+                </span>
+              </div>
+
+              <div className="flex items-start justify-between py-1 border-b border-[#E8DCD5]/70">
+                <span className="text-[#7A6B62] font-medium shrink-0">Horario actual del salón:</span>
+                <span className="font-mono font-semibold text-[#241E1A] text-right">
+                  {coverageModalData.studioDesc}
+                </span>
+              </div>
+
+              {/* Exceeded Intervals List */}
+              <div className="pt-1">
+                <p className="font-semibold text-amber-900 mb-1.5 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-700" />
+                  <span>Días y horarios que se exceden (Lista):</span>
+                </p>
+                <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-3 space-y-1.5">
+                  {coverageModalData.isStudioClosed ? (
+                    <div className="flex items-center gap-2 text-amber-950 font-medium">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
+                      <span>El salón figura cerrado todo el día ({coverageModalData.fecha})</span>
+                    </div>
+                  ) : coverageModalData.uncoveredIntervals.length > 0 ? (
+                    coverageModalData.uncoveredIntervals.map((int, i) => (
+                      <div key={i} className="flex items-center justify-between text-amber-950">
+                        <div className="flex items-center gap-2">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
+                          <span className="font-mono font-bold">{int.inicio} a {int.fin} hs</span>
+                        </div>
+                        <span className="text-[11px] text-amber-800 bg-amber-100/70 px-2 py-0.5 rounded-md font-medium">
+                          Supera atención del salón
+                        </span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="flex items-center gap-2 text-amber-950">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
+                      <span>Los tramos solicitados no coinciden con la apertura del salón.</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Solution hint */}
+              <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900 flex items-start gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                <span>
+                  Al extender, se creará también una excepción de disponibilidad para el salón de{' '}
+                  <strong>
+                    {coverageModalData.requiredStudioIntervals.map(i => `${i.inicio} a ${i.fin} hs`).join(', ')}
+                  </strong>{' '}
+                  en esa fecha puntual.
+                </span>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-col sm:flex-row items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                disabled={isExtendingStudio}
+                onClick={handleCancelCoverageModal}
+                className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-[#D9C9BF] text-xs font-semibold text-[#5A4B43] hover:bg-[#FAF7F2] transition-colors cursor-pointer disabled:opacity-50 text-center"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={isExtendingStudio}
+                onClick={handleConfirmExtendStudioAndSave}
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-[#8E4455] hover:bg-[#783645] text-white text-xs font-semibold shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isExtendingStudio ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Extendiendo salón y guardando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Extender disponibilidad del salón y guardar</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

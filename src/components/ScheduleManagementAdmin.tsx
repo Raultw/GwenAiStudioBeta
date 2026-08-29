@@ -6,6 +6,7 @@ import {
   Trash2,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Sparkles,
   RefreshCw,
   User,
@@ -29,6 +30,25 @@ interface ScheduleManagementAdminProps {
   professionals?: Professional[];
   onRefreshData?: () => void;
   initialProfessionalId?: string | null;
+}
+
+interface WeeklyCoverageConflictItem {
+  dayKey: DayOfWeekKey;
+  dayLabel: string;
+  isStudioClosed: boolean;
+  studioIntervals: TimeInterval[];
+  profIntervals: TimeInterval[];
+  uncoveredIntervals: TimeInterval[];
+  requiredStudioIntervals: TimeInterval[];
+  studioDesc: string;
+  profDesc: string;
+}
+
+interface WeeklyCoverageConflictModalData {
+  fechaVigencia: string;
+  profName: string;
+  conflicts: WeeklyCoverageConflictItem[];
+  extendedStudioWeekDays: WeekScheduleMap;
 }
 
 const DAYS_ORDER: { key: DayOfWeekKey; label: string }[] = [
@@ -74,6 +94,10 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Coverage conflict modal state
+  const [coverageModalData, setCoverageModalData] = useState<WeeklyCoverageConflictModalData | null>(null);
+  const [isExtendingStudio, setIsExtendingStudio] = useState<boolean>(false);
 
   // Current editing schedule state
   const [fechaVigencia, setFechaVigencia] = useState<string>(getTodayIso());
@@ -288,6 +312,33 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
 
     setIsSaving(true);
     try {
+      // If saving professional schedule, check if it exceeds the studio schedule
+      if (activeScope === 'profesional') {
+        const checkRes = await fetch('/api/horarios/check-cobertura', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fechaVigencia,
+            dias: weekDays,
+            profesionalId: selectedProfId
+          })
+        });
+
+        if (checkRes.ok) {
+          const checkData = await checkRes.json();
+          if (checkData.hasConflict && checkData.conflicts && checkData.conflicts.length > 0) {
+            setIsSaving(false);
+            setCoverageModalData({
+              fechaVigencia,
+              profName: selectedProfessional?.nombre || 'la profesional',
+              conflicts: checkData.conflicts,
+              extendedStudioWeekDays: checkData.extendedStudioWeekDays
+            });
+            return;
+          }
+        }
+      }
+
       const payload = {
         alcance: activeScope,
         profesionalId: activeScope === 'profesional' ? selectedProfId : undefined,
@@ -310,7 +361,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
       setSuccessMsg(
         activeScope === 'local'
           ? `¡Horario del local guardado con éxito! Vigente a partir del ${saved.fechaVigencia}.`
-          : `¡Horario del profesional guardado con éxito! Vigente a partir del ${saved.fechaVigencia}.`
+          : `¡Horario de ${selectedProfessional?.nombre || 'la profesional'} guardado con éxito! Vigente a partir del ${saved.fechaVigencia}.`
       );
       setTimeout(() => setSuccessMsg(null), 5000);
       await loadSchedules();
@@ -323,12 +374,183 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
     }
   };
 
+  // Confirm extending studio schedule and saving both
+  const handleConfirmExtendStudioAndSave = async () => {
+    if (!coverageModalData) return;
+    setIsExtendingStudio(true);
+    setErrorMsg(null);
+    try {
+      // 1. Extend Studio Weekly Schedule from fechaVigencia onwards
+      const studioPayload = {
+        alcance: 'local',
+        fechaVigencia: coverageModalData.fechaVigencia,
+        dias: coverageModalData.extendedStudioWeekDays
+      };
+      const studioRes = await fetch('/api/horarios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(studioPayload)
+      });
+      if (!studioRes.ok) {
+        const errData = await studioRes.json().catch(() => ({}));
+        throw new Error(errData.error || 'Error al extender el cronograma del salón.');
+      }
+
+      // 2. Save Professional Weekly Schedule from fechaVigencia onwards
+      const profPayload = {
+        alcance: 'profesional',
+        profesionalId: selectedProfId,
+        fechaVigencia: coverageModalData.fechaVigencia,
+        dias: weekDays
+      };
+      const profRes = await fetch('/api/horarios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(profPayload)
+      });
+      if (!profRes.ok) {
+        const errData = await profRes.json().catch(() => ({}));
+        throw new Error(errData.error || 'Error al guardar el cronograma de la profesional.');
+      }
+
+      setSuccessMsg(
+        `¡Horario del salón extendido y cronograma de ${coverageModalData.profName} guardado con éxito a partir del ${coverageModalData.fechaVigencia}!`
+      );
+      setTimeout(() => setSuccessMsg(null), 6000);
+      setCoverageModalData(null);
+      await loadSchedules();
+      if (onRefreshData) onRefreshData();
+    } catch (err: any) {
+      console.error('Error extending studio and saving prof schedule:', err);
+      setErrorMsg(err.message || 'Error al extender el cronograma del salón.');
+    } finally {
+      setIsExtendingStudio(false);
+    }
+  };
+
+  const handleCancelCoverageModal = () => {
+    setCoverageModalData(null);
+    setIsSaving(false);
+  };
+
   const selectedProfessional = useMemo(() => {
     return professionals.find(p => p.id === selectedProfId);
   }, [professionals, selectedProfId]);
 
   return (
     <div className="space-y-6">
+      {/* STUDIO COVERAGE CONFLICT WARNING MODAL */}
+      {coverageModalData && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl border border-[#E8DCD5] shadow-2xl max-w-lg w-full p-6 sm:p-7 space-y-5 max-h-[90vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="flex items-start gap-3.5 pb-3 border-b border-[#E8DCD5]">
+              <div className="w-10 h-10 rounded-2xl bg-amber-100 border border-amber-200 flex items-center justify-center text-amber-700 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="font-serif font-bold text-lg text-[#241E1A]">
+                  Conflicto con los Horarios del Salón
+                </h4>
+                <p className="text-xs text-[#7A6B62] mt-0.5">
+                  El cronograma de <strong>{coverageModalData.profName}</strong> excede la atención del local a partir del <strong>{coverageModalData.fechaVigencia}</strong>.
+                </p>
+              </div>
+            </div>
+
+            {/* Modal Body: Conflicts Breakdown */}
+            <div className="space-y-3.5 text-xs text-[#5A4B43]">
+              <p className="leading-relaxed">
+                Para que la profesional pueda atender en estos horarios, el salón debe estar abierto y disponible durante esos tramos.
+              </p>
+
+              {/* List of Conflicted Days */}
+              <div className="space-y-2">
+                <p className="font-semibold text-amber-900 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-700" />
+                  <span>Días y tramos que superan la atención del salón:</span>
+                </p>
+
+                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                  {coverageModalData.conflicts.map((conf, idx) => (
+                    <div
+                      key={idx}
+                      className="bg-amber-50/80 border border-amber-200 rounded-xl p-3 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between font-serif font-bold text-[#241E1A]">
+                        <span>{conf.dayLabel}</span>
+                        <span className="text-[10px] font-sans font-semibold text-amber-800 bg-amber-100/80 px-2 py-0.5 rounded-full border border-amber-200">
+                          {conf.isStudioClosed ? 'Salón Cerrado' : 'Supera Apertura'}
+                        </span>
+                      </div>
+
+                      <div className="text-[11px] text-[#5A4B43] space-y-0.5">
+                        <p>
+                          <strong>🏢 Salón actual:</strong> {conf.studioDesc}
+                        </p>
+                        <p>
+                          <strong>👩‍🎨 {coverageModalData.profName}:</strong> {conf.profDesc}
+                        </p>
+                      </div>
+
+                      <div className="pt-1 flex flex-wrap gap-1">
+                        {conf.uncoveredIntervals.map((int, i) => (
+                          <span
+                            key={i}
+                            className="text-[10px] font-mono font-semibold bg-white text-amber-900 border border-amber-300 px-2 py-0.5 rounded-md"
+                          >
+                            Excede: {int.inicio} a {int.fin} hs
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Solution hint */}
+              <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3 text-[11px] text-emerald-900 flex items-start gap-2">
+                <Sparkles className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <span>
+                  Al extender, se actualizará también el cronograma semanal del salón a partir del <strong>{coverageModalData.fechaVigencia}</strong> cubriendo estos horarios.
+                </span>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-col sm:flex-row items-center justify-end gap-2.5 pt-2 border-t border-[#E8DCD5]">
+              <button
+                type="button"
+                disabled={isExtendingStudio}
+                onClick={handleCancelCoverageModal}
+                className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-[#D9C9BF] text-xs font-semibold text-[#5A4B43] hover:bg-[#FAF7F2] transition-colors cursor-pointer disabled:opacity-50 text-center"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={isExtendingStudio}
+                onClick={handleConfirmExtendStudioAndSave}
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-[#8E4455] hover:bg-[#783645] text-white text-xs font-semibold shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isExtendingStudio ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Extendiendo salón y guardando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Extender disponibilidad del salón y guardar</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header card */}
       <div className="bg-white p-6 sm:p-7 rounded-3xl border border-[#E8DCD5] shadow-xs">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">

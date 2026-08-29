@@ -314,6 +314,7 @@ export interface StudioConfig {
   bloqueosDetallados?: BlockedTimeRange[];
   pinAdmin: string;
   diasInactividadCliente?: number; // Días sin visitas para considerar cliente inactivo (default: 60)
+  minTurnosRecurrente?: number; // Cantidad mínima de turnos para considerar cliente recurrente (default: 2)
 }
 
 export interface DashboardStats {

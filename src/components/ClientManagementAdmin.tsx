@@ -34,7 +34,8 @@ import {
   Heart,
   Sliders,
   Settings,
-  Scissors
+  Scissors,
+  Lock
 } from 'lucide-react';
 import type { 
   Client, 
@@ -79,6 +80,12 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
   const [isEditingInactivity, setIsEditingInactivity] = useState<boolean>(false);
   const [tempInactivityInput, setTempInactivityInput] = useState<number>(60);
   const [isSavingInactivity, setIsSavingInactivity] = useState<boolean>(false);
+
+  // Recurrent threshold configuration
+  const [minRecurrentAppointments, setMinRecurrentAppointments] = useState<number>(2);
+  const [isEditingRecurrent, setIsEditingRecurrent] = useState<boolean>(false);
+  const [tempRecurrentInput, setTempRecurrentInput] = useState<number>(2);
+  const [isSavingRecurrent, setIsSavingRecurrent] = useState<boolean>(false);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -164,8 +171,11 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
       if (configRes.ok) {
         const configData = await configRes.json();
         const days = configData.diasInactividadCliente || 60;
+        const minRecur = configData.minTurnosRecurrente || 2;
         setInactivityDays(days);
         setTempInactivityInput(days);
+        setMinRecurrentAppointments(minRecur);
+        setTempRecurrentInput(minRecur);
       }
     } catch (err) {
       console.error('Error loading client data:', err);
@@ -191,11 +201,44 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
     setClientPage(1);
   }, [categoryFilter, searchQuery]);
 
-  const totalClientPages = Math.ceil(clients.length / CLIENTS_PER_PAGE) || 1;
+  // Filter clients strictly with search query
+  const filteredClients = useMemo(() => {
+    if (!searchQuery.trim()) return clients;
+    const q = searchQuery.trim().toLowerCase();
+    const qNorm = q.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const qDigits = searchQuery.replace(/\D/g, '');
+    return clients.filter(c => {
+      const nom = (c.nombre || '').toLowerCase();
+      const ape = (c.apellido || '').toLowerCase();
+      const full = `${nom} ${ape}`;
+      const nomNorm = (c.nombreNormalizado || '').toLowerCase();
+      const apeNorm = (c.apellidoNormalizado || '').toLowerCase();
+      const fullNorm = `${nomNorm} ${apeNorm}`;
+      const tel = (c.telefono || '').toLowerCase();
+      const telNorm = (c.telefonoNormalizado || '').toLowerCase();
+      const email = (c.email || '').toLowerCase();
+      const notas = (c.notasAdmin || '').toLowerCase();
+
+      return (
+        nom.includes(q) ||
+        ape.includes(q) ||
+        full.includes(q) ||
+        nomNorm.includes(qNorm) ||
+        apeNorm.includes(qNorm) ||
+        fullNorm.includes(qNorm) ||
+        tel.includes(q) ||
+        (qDigits.length >= 3 && telNorm.includes(qDigits)) ||
+        email.includes(q) ||
+        notas.includes(q)
+      );
+    });
+  }, [clients, searchQuery]);
+
+  const totalClientPages = Math.ceil(filteredClients.length / CLIENTS_PER_PAGE) || 1;
   const paginatedClients = useMemo(() => {
     const startIdx = (clientPage - 1) * CLIENTS_PER_PAGE;
-    return clients.slice(startIdx, startIdx + CLIENTS_PER_PAGE);
-  }, [clients, clientPage]);
+    return filteredClients.slice(startIdx, startIdx + CLIENTS_PER_PAGE);
+  }, [filteredClients, clientPage]);
 
   // Handle Initial Client Lookup when navigating directly from Turnos list
   useEffect(() => {
@@ -265,6 +308,37 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
       showToast('Error de conexión.');
     } finally {
       setIsSavingInactivity(false);
+    }
+  };
+
+  // Save Recurrent Min Appointments Threshold
+  const handleSaveRecurrentMin = async () => {
+    if (tempRecurrentInput < 1 || tempRecurrentInput > 50) {
+      showToast('Por favor ingresá un valor válido entre 1 y 50.');
+      return;
+    }
+
+    setIsSavingRecurrent(true);
+    try {
+      const res = await fetch('/api/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minTurnosRecurrente: Number(tempRecurrentInput) })
+      });
+
+      if (res.ok) {
+        setMinRecurrentAppointments(Number(tempRecurrentInput));
+        setIsEditingRecurrent(false);
+        showToast(`Criterio de recurrentes actualizado a ${tempRecurrentInput} o más turnos.`);
+        loadClientData();
+      } else {
+        showToast('Error al actualizar criterio de recurrentes.');
+      }
+    } catch (err) {
+      console.error('Error saving minRecurrentAppointments:', err);
+      showToast('Error de conexión.');
+    } finally {
+      setIsSavingRecurrent(false);
     }
   };
 
@@ -499,9 +573,29 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
   };
 
   // Helpers
+  const formatClienteDesdeDate = (iso?: string) => {
+    if (!iso) return 'Fecha no registrada';
+    try {
+      const dateOnly = iso.split('T')[0];
+      const [y, m, d] = dateOnly.split('-');
+      if (y && m && d) {
+        const dateObj = new Date(Number(y), Number(m) - 1, Number(d));
+        if (!isNaN(dateObj.getTime())) {
+          return dateObj.toLocaleDateString('es-AR', { day: 'numeric', month: 'long', year: 'numeric' });
+        }
+        return `${d}/${m}/${y}`;
+      }
+    } catch (e) {
+      // fallback
+    }
+    return iso;
+  };
+
   const formatDateFriendly = (iso?: string) => {
     if (!iso) return 'Sin visitas';
-    const [y, m, d] = iso.split('-');
+    const datePart = iso.split('T')[0];
+    const [y, m, d] = datePart.split('-');
+    if (!y || !m || !d) return iso;
     return `${d}/${m}/${y}`;
   };
 
@@ -574,15 +668,64 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
           <span className="text-[10px] text-[#7A6B62]">Perfiles únicos</span>
         </div>
 
-        <div className="bg-white p-4 rounded-2xl border border-[#E8DCD5]">
+        <div className="bg-white p-4 rounded-2xl border border-[#E8DCD5] relative group">
           <div className="flex items-center justify-between text-[#8C7A70] text-xs font-medium mb-1">
             <span>Recurrentes</span>
-            <Sparkles className="w-4 h-4 text-emerald-600" />
+            <div className="flex items-center gap-1">
+              <Sparkles className="w-4 h-4 text-emerald-600" />
+              <button
+                onClick={() => setIsEditingRecurrent(!isEditingRecurrent)}
+                title="Editar umbral de turnos para recurrentes"
+                className="text-[#8C7A70] hover:text-[#8E4455] p-0.5 rounded transition-colors"
+              >
+                <Edit3 className="w-3 h-3" />
+              </button>
+            </div>
           </div>
           <p className="text-2xl font-serif font-bold text-emerald-700">
             {stats ? stats.clientesRecurrentes : '...'}
           </p>
-          <span className="text-[10px] text-[#7A6B62]">2 o más turnos</span>
+          {!isEditingRecurrent ? (
+            <div className="flex items-center justify-between text-[10px] text-emerald-700 mt-0.5">
+              <span>{`${minRecurrentAppointments} o más turnos`}</span>
+              <button
+                onClick={() => setIsEditingRecurrent(true)}
+                className="underline text-[10px] text-[#8E4455] font-semibold hover:text-[#783746]"
+              >
+                Cambiar
+              </button>
+            </div>
+          ) : (
+            <div className="mt-1 space-y-1 bg-[#FAF7F2] p-2 rounded-xl border border-[#E8DCD5] animate-fade-in">
+              <span className="text-[9px] uppercase font-bold text-[#8C7A70] block">Mínimo turnos:</span>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={tempRecurrentInput}
+                  onChange={(e) => setTempRecurrentInput(Number(e.target.value))}
+                  className="w-14 px-1.5 py-0.5 text-xs font-bold text-[#241E1A] bg-white border border-[#D9C9BF] rounded-md focus:outline-none focus:border-[#8E4455]"
+                />
+                <button
+                  onClick={handleSaveRecurrentMin}
+                  disabled={isSavingRecurrent}
+                  className="px-2 py-0.5 bg-[#8E4455] text-white text-[10px] font-bold rounded-md hover:bg-[#783746]"
+                >
+                  OK
+                </button>
+                <button
+                  onClick={() => {
+                    setIsEditingRecurrent(false);
+                    setTempRecurrentInput(minRecurrentAppointments);
+                  }}
+                  className="px-1.5 py-0.5 text-[#7A6B62] text-[10px] hover:text-[#241E1A]"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="bg-white p-4 rounded-2xl border border-[#E8DCD5]">
@@ -931,19 +1074,23 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
               <RefreshCw className="w-6 h-6 animate-spin mx-auto text-[#8E4455] mb-2" />
               <p className="text-sm">Buscando clientas...</p>
             </div>
-          ) : clients.length === 0 ? (
+          ) : filteredClients.length === 0 ? (
             <div className="p-12 text-center">
               <Users className="w-10 h-10 text-[#D9C9BF] mx-auto mb-3" />
-              <h4 className="font-serif font-medium text-[#241E1A] text-base">No se encontraron clientes</h4>
+              <h4 className="font-serif font-medium text-[#241E1A] text-base">
+                {searchQuery.trim() ? 'No existe ninguna clienta que coincida con la búsqueda' : 'No se encontraron clientas'}
+              </h4>
               <p className="text-xs text-[#7A6B62] mt-1 max-w-sm mx-auto">
-                No hay coincidencias para el filtro o término de búsqueda ingresado.
+                {searchQuery.trim()
+                  ? `No hay registros coincidentes para "${searchQuery.trim()}".`
+                  : 'No hay coincidencias para la categoría seleccionada.'}
               </p>
             </div>
           ) : (
             <>
               <div className="divide-y divide-[#E8DCD5]">
                 {paginatedClients.map((client) => {
-                  const isRecurrent = (client.totalTurnos || 0) >= 2;
+                  const isRecurrent = (client.totalTurnos || 0) >= minRecurrentAppointments;
                   const hasUpcoming = Boolean(client.proximoTurno);
                   const hasDuplicateWarning = Boolean(client.posibleDuplicadoDe && client.posibleDuplicadoDe.length > 0 && !client.duplicadoRevisado);
                   const hasActiveAlerts = (client.alertasActivasCount || 0) > 0;
@@ -1174,7 +1321,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
                     <h3 className="font-serif text-xl font-bold text-[#241E1A]">
                       {selectedClient.nombre} {selectedClient.apellido}
                     </h3>
-                    {(selectedClient.totalTurnos || 0) >= 2 && (
+                    {(selectedClient.totalTurnos || 0) >= minRecurrentAppointments && (
                       <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
                         Recurrente
                       </span>
@@ -1187,7 +1334,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
                     )}
                   </div>
                   <p className="text-xs text-[#7A6B62] mt-0.5">
-                    Cliente desde {formatDateFriendly(selectedClient.fechaAlta)} • ID: <span className="font-mono text-[10px]">{selectedClient.id.slice(0, 8)}...</span>
+                    Cliente desde <span className="font-medium text-[#241E1A]">{formatClienteDesdeDate(selectedClient.fechaAlta)}</span> • ID: <span className="font-mono text-[10px]">{selectedClient.id.slice(0, 8)}...</span>
                   </p>
                 </div>
               </div>
@@ -1452,7 +1599,17 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
                                 </div>
                                 {lastApt.observaciones && (
                                   <p className="text-xs text-[#5C4D44] mt-2 italic bg-[#FAF7F2] p-2.5 rounded-lg border border-[#E8DCD5]/60">
+                                    <span className="font-semibold text-[#8C7A70] not-italic">Nota clienta: </span>
                                     "{lastApt.observaciones}"
+                                  </p>
+                                )}
+                                {lastApt.notasAdmin && (
+                                  <p className="text-xs text-amber-950 mt-2 bg-amber-50/90 p-2.5 rounded-lg border border-amber-200/80 flex items-start gap-1.5 shadow-2xs">
+                                    <Lock className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
+                                    <span>
+                                      <strong className="text-amber-900 font-semibold">Nota privada del salón: </strong>
+                                      {lastApt.notasAdmin}
+                                    </span>
                                   </p>
                                 )}
                               </div>
@@ -1925,7 +2082,17 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
                       </div>
                       {apt.observaciones && (
                         <p className="text-xs text-[#5C4D44] mt-2 italic bg-[#FAF7F2] p-2.5 rounded-lg border border-[#E8DCD5]/60">
+                          <span className="font-semibold text-[#8C7A70] not-italic">Nota clienta: </span>
                           "{apt.observaciones}"
+                        </p>
+                      )}
+                      {apt.notasAdmin && (
+                        <p className="text-xs text-amber-950 mt-2 bg-amber-50/90 p-2.5 rounded-lg border border-amber-200/80 flex items-start gap-1.5 shadow-2xs">
+                          <Lock className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
+                          <span>
+                            <strong className="text-amber-900 font-semibold">Nota privada del salón: </strong>
+                            {apt.notasAdmin}
+                          </span>
                         </p>
                       )}
                     </div>

@@ -73,6 +73,7 @@ import {
   calculateAvailability,
   validateBookingSlot,
   checkStudioCoverageForProfessionalException,
+  checkStudioCoverageForProfessionalWeeklySchedule,
   timeToMinutes,
   minutesToTime
 } from "./src/server/availabilityEngine.js";
@@ -312,9 +313,11 @@ app.post("/api/turnos", async (req, res) => {
       turno: saved,
       whatsappUrl
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error in POST /api/turnos:", error);
-    res.status(500).json({ error: "Error al procesar la reserva" });
+    const msg = error?.message || "Error al procesar la reserva";
+    const status = msg.includes("ya ha sido reservado") || msg.includes("concurrente") || msg.includes("simultánea") ? 409 : 500;
+    res.status(status).json({ error: msg });
   }
 });
 
@@ -1199,6 +1202,26 @@ app.post("/api/horarios", async (req, res) => {
   } catch (error) {
     console.error("Error in POST /api/horarios:", error);
     res.status(500).json({ error: "Error al guardar horario" });
+  }
+});
+
+// 29.1 POST /api/horarios/check-cobertura (Verifies studio coverage for professional weekly schedule)
+app.post("/api/horarios/check-cobertura", async (req, res) => {
+  try {
+    const { fechaVigencia, dias, profesionalId } = req.body;
+    if (!fechaVigencia || !dias) {
+      res.status(400).json({ error: "fechaVigencia y dias son requeridos" });
+      return;
+    }
+    const checkResult = await checkStudioCoverageForProfessionalWeeklySchedule(
+      fechaVigencia,
+      dias,
+      profesionalId
+    );
+    res.json(checkResult);
+  } catch (error) {
+    console.error("Error in POST /api/horarios/check-cobertura:", error);
+    res.status(500).json({ error: "Error al verificar cobertura de horarios del salón" });
   }
 });
 

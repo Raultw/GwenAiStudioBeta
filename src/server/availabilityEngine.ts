@@ -8,7 +8,9 @@ import type {
   ScheduleConfig,
   AvailabilityException,
   Professional,
-  AvailableProfessionalSummary
+  AvailableProfessionalSummary,
+  WeekScheduleMap,
+  DayOfWeekKey
 } from '../types.js';
 import {
   getServices,
@@ -18,7 +20,8 @@ import {
   getProfessionalsForService,
   isProfessionalHabilitated,
   getScheduleForDate,
-  getAvailabilityExceptions
+  getAvailabilityExceptions,
+  defaultWeeklySchedule
 } from './db.js';
 
 // Utility: convert HH:mm to minutes from midnight
@@ -65,6 +68,55 @@ export function normalizeIntervals(intervals: TimeInterval[]): TimeInterval[] {
     }
   }
 
+  return merged.map(m => ({
+    inicio: minutesToTime(m.start),
+    fin: minutesToTime(m.end)
+  }));
+}
+
+/**
+ * Finds which portions of the requested intervals are NOT covered by the available intervals.
+ */
+export function findUncoveredIntervals(
+  requested: TimeInterval[],
+  available: TimeInterval[]
+): TimeInterval[] {
+  const normReq = normalizeIntervals(requested);
+  const normAvail = normalizeIntervals(available);
+  if (normReq.length === 0) return [];
+  if (normAvail.length === 0) return normReq;
+
+  const uncovered: Array<{ start: number; end: number }> = [];
+
+  for (const req of normReq) {
+    let reqSegments: Array<{ start: number; end: number }> = [
+      { start: timeToMinutes(req.inicio), end: timeToMinutes(req.fin) }
+    ];
+
+    for (const avail of normAvail) {
+      const aStart = timeToMinutes(avail.inicio);
+      const aEnd = timeToMinutes(avail.fin);
+      const newSegments: Array<{ start: number; end: number }> = [];
+
+      for (const seg of reqSegments) {
+        if (seg.end <= aStart || seg.start >= aEnd) {
+          newSegments.push(seg);
+        } else {
+          if (seg.start < aStart) {
+            newSegments.push({ start: seg.start, end: aStart });
+          }
+          if (seg.end > aEnd) {
+            newSegments.push({ start: aEnd, end: seg.end });
+          }
+        }
+      }
+      reqSegments = newSegments;
+    }
+
+    uncovered.push(...reqSegments);
+  }
+
+  const merged = uncovered.filter(u => u.start < u.end).sort((a, b) => a.start - b.start);
   return merged.map(m => ({
     inicio: minutesToTime(m.start),
     fin: minutesToTime(m.end)
@@ -295,17 +347,29 @@ export async function checkStudioCoverageForProfessionalException(
   isStudioClosed: boolean;
   studioEffectiveIntervals: TimeInterval[];
   requiredStudioIntervals: TimeInterval[];
+  uncoveredIntervals: TimeInterval[];
   warningMessage?: string;
+  studioScheduleDescription: string;
+  professionalScheduleDescription: string;
 }> {
   const studioSched = await getEffectiveStudioSchedule(dateStr);
   const normalizedProf = normalizeIntervals(profIntervalos);
+
+  const profDesc = normalizedProf.length > 0 
+    ? normalizedProf.map(i => `${i.inicio} a ${i.fin} hs`).join(', ') 
+    : 'Sin tramos definidos';
 
   if (normalizedProf.length === 0) {
     return {
       exceedsStudio: false,
       isStudioClosed: !studioSched.abierto,
       studioEffectiveIntervals: studioSched.intervalos,
-      requiredStudioIntervals: studioSched.intervalos
+      requiredStudioIntervals: studioSched.intervalos,
+      uncoveredIntervals: [],
+      studioScheduleDescription: studioSched.abierto && studioSched.intervalos.length > 0
+        ? studioSched.intervalos.map(i => `${i.inicio} a ${i.fin} hs`).join(', ')
+        : 'Cerrado',
+      professionalScheduleDescription: profDesc
     };
   }
 
@@ -315,47 +379,141 @@ export async function checkStudioCoverageForProfessionalException(
       isStudioClosed: true,
       studioEffectiveIntervals: [],
       requiredStudioIntervals: normalizedProf,
-      warningMessage: `El local figura CERRADO para la fecha ${dateStr}. Si habilitás profesionales, deberás extender la apertura del local para esa fecha.`
+      uncoveredIntervals: normalizedProf,
+      warningMessage: `El local figura CERRADO para la fecha ${dateStr}.`,
+      studioScheduleDescription: studioSched.motivo || 'Salón cerrado (no abre según cronograma o excepción)',
+      professionalScheduleDescription: profDesc
     };
   }
 
-  // Check if every minute in normalizedProf is covered by studioSched.intervalos
-  let exceeds = false;
-  const mergedCombined = normalizeIntervals([...studioSched.intervalos, ...normalizedProf]);
-
-  // Check if mergedCombined has wider bounds than studioSched.intervalos
-  const studioMin = Math.min(...studioSched.intervalos.map(i => timeToMinutes(i.inicio)));
-  const studioMax = Math.max(...studioSched.intervalos.map(i => timeToMinutes(i.fin)));
-  const profMin = Math.min(...normalizedProf.map(i => timeToMinutes(i.inicio)));
-  const profMax = Math.max(...normalizedProf.map(i => timeToMinutes(i.fin)));
-
-  if (profMin < studioMin || profMax > studioMax) {
-    exceeds = true;
-  } else {
-    // Check internal intervals coverage
-    for (const p of normalizedProf) {
-      const pStart = timeToMinutes(p.inicio);
-      const pEnd = timeToMinutes(p.fin);
-      const isCovered = studioSched.intervalos.some(s => {
-        const sStart = timeToMinutes(s.inicio);
-        const sEnd = timeToMinutes(s.fin);
-        return sStart <= pStart && sEnd >= pEnd;
-      });
-      if (!isCovered) {
-        exceeds = true;
-        break;
-      }
-    }
-  }
+  const studioDesc = studioSched.intervalos.map(i => `${i.inicio} a ${i.fin} hs`).join(', ');
+  const uncovered = findUncoveredIntervals(normalizedProf, studioSched.intervalos);
+  const exceeds = uncovered.length > 0;
+  const combined = normalizeIntervals([...studioSched.intervalos, ...normalizedProf]);
 
   return {
     exceedsStudio: exceeds,
     isStudioClosed: false,
     studioEffectiveIntervals: studioSched.intervalos,
-    requiredStudioIntervals: mergedCombined,
+    requiredStudioIntervals: combined,
+    uncoveredIntervals: uncovered,
     warningMessage: exceeds
-      ? `El horario del profesional (${minutesToTime(profMin)} a ${minutesToTime(profMax)}) excede el horario del local (${minutesToTime(studioMin)} a ${minutesToTime(studioMax)}).`
-      : undefined
+      ? `El horario configurado para los profesionales excede los tramos de apertura del salón (${studioDesc}) para el ${dateStr}.`
+      : undefined,
+    studioScheduleDescription: studioDesc,
+    professionalScheduleDescription: profDesc
+  };
+}
+
+/**
+ * Checks whether a proposed professional weekly schedule exceeds
+ * the effective studio weekly schedule active from `fechaVigencia` onwards.
+ */
+export async function checkStudioCoverageForProfessionalWeeklySchedule(
+  fechaVigencia: string,
+  profWeekDays: WeekScheduleMap,
+  profesionalId?: string
+): Promise<{
+  hasConflict: boolean;
+  conflicts: Array<{
+    dayKey: DayOfWeekKey;
+    dayLabel: string;
+    isStudioClosed: boolean;
+    studioIntervals: TimeInterval[];
+    profIntervals: TimeInterval[];
+    uncoveredIntervals: TimeInterval[];
+    requiredStudioIntervals: TimeInterval[];
+    studioDesc: string;
+    profDesc: string;
+  }>;
+  extendedStudioWeekDays: WeekScheduleMap;
+  effectiveFechaVigencia: string;
+}> {
+  // Get active Studio Schedule for fechaVigencia
+  const localSchedule = await getScheduleForDate('local', undefined, fechaVigencia);
+  const studioDays: WeekScheduleMap = localSchedule?.dias || defaultWeeklySchedule;
+
+  const conflicts: Array<{
+    dayKey: DayOfWeekKey;
+    dayLabel: string;
+    isStudioClosed: boolean;
+    studioIntervals: TimeInterval[];
+    profIntervals: TimeInterval[];
+    uncoveredIntervals: TimeInterval[];
+    requiredStudioIntervals: TimeInterval[];
+    studioDesc: string;
+    profDesc: string;
+  }> = [];
+
+  const extendedStudioWeekDays: WeekScheduleMap = JSON.parse(JSON.stringify(studioDays));
+
+  const daysMeta: { key: DayOfWeekKey; label: string }[] = [
+    { key: 'lunes', label: 'Lunes' },
+    { key: 'martes', label: 'Martes' },
+    { key: 'miercoles', label: 'Miércoles' },
+    { key: 'jueves', label: 'Jueves' },
+    { key: 'viernes', label: 'Viernes' },
+    { key: 'sabado', label: 'Sábado' },
+    { key: 'domingo', label: 'Domingo' }
+  ];
+
+  for (const dm of daysMeta) {
+    const profDay = profWeekDays[dm.key];
+    const studioDay = studioDays[dm.key];
+
+    if (profDay && profDay.abierto && profDay.intervalos && profDay.intervalos.length > 0) {
+      const normProf = normalizeIntervals(profDay.intervalos);
+      const profDesc = normProf.map(i => `${i.inicio} a ${i.fin} hs`).join(', ');
+
+      if (!studioDay || !studioDay.abierto || !studioDay.intervalos || studioDay.intervalos.length === 0) {
+        // Salon is completely closed on this day
+        conflicts.push({
+          dayKey: dm.key,
+          dayLabel: dm.label,
+          isStudioClosed: true,
+          studioIntervals: [],
+          profIntervals: normProf,
+          uncoveredIntervals: normProf,
+          requiredStudioIntervals: normProf,
+          studioDesc: 'Cerrado',
+          profDesc
+        });
+        extendedStudioWeekDays[dm.key] = {
+          abierto: true,
+          intervalos: normProf
+        };
+      } else {
+        const normStudio = normalizeIntervals(studioDay.intervalos);
+        const uncovered = findUncoveredIntervals(normProf, normStudio);
+
+        if (uncovered.length > 0) {
+          const combined = normalizeIntervals([...normStudio, ...normProf]);
+          const studioDesc = normStudio.map(i => `${i.inicio} a ${i.fin} hs`).join(', ');
+          conflicts.push({
+            dayKey: dm.key,
+            dayLabel: dm.label,
+            isStudioClosed: false,
+            studioIntervals: normStudio,
+            profIntervals: normProf,
+            uncoveredIntervals: uncovered,
+            requiredStudioIntervals: combined,
+            studioDesc,
+            profDesc
+          });
+          extendedStudioWeekDays[dm.key] = {
+            abierto: true,
+            intervalos: combined
+          };
+        }
+      }
+    }
+  }
+
+  return {
+    hasConflict: conflicts.length > 0,
+    conflicts,
+    extendedStudioWeekDays,
+    effectiveFechaVigencia: fechaVigencia
   };
 }
 
