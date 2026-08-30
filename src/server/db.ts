@@ -25,8 +25,16 @@ import type {
   ScheduleScope,
   ScheduleConfig,
   AvailabilityExceptionType,
-  AvailabilityException
+  AvailabilityException,
+  Promotion,
+  PromotionUsage,
+  ClientBenefit,
+  ValidateDiscountResult,
+  DiscountType,
+  BenefitStatus,
+  BenefitOrigin
 } from '../types.js';
+import type { NotificationLog } from './notifications/types.js';
 import { 
   normalizeText, 
   normalizePersonName,
@@ -282,13 +290,52 @@ export const defaultStudioConfig: StudioConfig = {
   },
   intervaloMinutos: 30,
   bufferMinutos: 0,
-  diasBloqueados: [],
-  horariosBloqueados: {},
-  bloqueosDetallados: [],
   pinAdmin: "1234",
   diasInactividadCliente: 60,
   minTurnosRecurrente: 2
 };
+
+// Default initial promotions
+export const defaultPromotions: Promotion[] = [
+  {
+    id: "promo-bienvenida-15",
+    codigo: "BIENVENIDA15",
+    nombre: "15% OFF Primera Visita",
+    descripcion: "Descuento de bienvenida aplicable a todos los servicios para nuevas clientas.",
+    activo: true,
+    tipoDescuento: "porcentaje",
+    valorDescuento: 15,
+    fechaInicio: "2025-01-01",
+    fechaVencimiento: null,
+    limiteTotalUsos: null,
+    limiteUsoPorCliente: 1,
+    periodoReutilizacionDias: null,
+    serviciosAplicables: ["todos"],
+    montoMinimo: null,
+    usosActuales: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  },
+  {
+    id: "promo-softgel-3000",
+    codigo: "SOFTGEL3000",
+    nombre: "$3.000 OFF en Soft Gel System",
+    descripcion: "Descuento de $3.000 aplicable al servicio estrella de extensiones Soft Gel.",
+    activo: true,
+    tipoDescuento: "monto_fijo",
+    valorDescuento: 3000,
+    fechaInicio: "2025-01-01",
+    fechaVencimiento: null,
+    limiteTotalUsos: 50,
+    limiteUsoPorCliente: 2,
+    periodoReutilizacionDias: 30,
+    serviciosAplicables: ["3"],
+    montoMinimo: 20000,
+    usosActuales: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }
+];
 
 // In-Memory & Local File Fallback Engine
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -307,6 +354,10 @@ interface FallbackDb {
   professionalServices: ProfessionalService[];
   schedules: ScheduleConfig[];
   availabilityExceptions: AvailabilityException[];
+  notificationLogs: NotificationLog[];
+  promotions: Promotion[];
+  promotionUsages: PromotionUsage[];
+  clientBenefits: ClientBenefit[];
 }
 
 const memoryDb: FallbackDb = {
@@ -327,7 +378,11 @@ const memoryDb: FallbackDb = {
     createdAt: new Date().toISOString()
   })),
   schedules: [defaultStudioSchedule, defaultProfessionalSchedule],
-  availabilityExceptions: []
+  availabilityExceptions: [],
+  notificationLogs: [],
+  promotions: defaultPromotions,
+  promotionUsages: [],
+  clientBenefits: []
 };
 
 function loadLocalFileDb() {
@@ -370,6 +425,18 @@ function loadLocalFileDb() {
       }
       if (parsed.availabilityExceptions && Array.isArray(parsed.availabilityExceptions)) {
         memoryDb.availabilityExceptions = parsed.availabilityExceptions;
+      }
+      if (parsed.notificationLogs && Array.isArray(parsed.notificationLogs)) {
+        memoryDb.notificationLogs = parsed.notificationLogs;
+      }
+      if (parsed.promotions && Array.isArray(parsed.promotions)) {
+        memoryDb.promotions = parsed.promotions;
+      }
+      if (parsed.promotionUsages && Array.isArray(parsed.promotionUsages)) {
+        memoryDb.promotionUsages = parsed.promotionUsages;
+      }
+      if (parsed.clientBenefits && Array.isArray(parsed.clientBenefits)) {
+        memoryDb.clientBenefits = parsed.clientBenefits;
       }
       if (parsed.config) {
         memoryDb.config = { ...defaultStudioConfig, ...parsed.config };
@@ -515,11 +582,24 @@ export async function initDatabase() {
           ALTER TABLE appointments ADD COLUMN IF NOT EXISTS browser_id VARCHAR(128);
           ALTER TABLE appointments ADD COLUMN IF NOT EXISTS profesional_id VARCHAR(64);
           ALTER TABLE appointments ADD COLUMN IF NOT EXISTS profesional_nombre VARCHAR(255);
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT;
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS cancelado_en TIMESTAMP WITH TIME ZONE;
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS cancelado_origen VARCHAR(64);
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS cancelado_por VARCHAR(255);
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS descuento_tipo VARCHAR(32);
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS descuento_id VARCHAR(64);
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS descuento_codigo VARCHAR(64);
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS descuento_nombre VARCHAR(255);
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS descuento_porcentaje NUMERIC;
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS descuento_monto NUMERIC;
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS precio_original NUMERIC;
+          ALTER TABLE appointments ADD COLUMN IF NOT EXISTS precio_final NUMERIC;
 
           CREATE INDEX IF NOT EXISTS idx_appointments_fecha ON appointments(fecha);
           CREATE INDEX IF NOT EXISTS idx_appointments_estado ON appointments(estado);
           CREATE INDEX IF NOT EXISTS idx_appointments_cliente_id ON appointments(cliente_id);
           CREATE INDEX IF NOT EXISTS idx_appointments_profesional_id ON appointments(profesional_id);
+          CREATE INDEX IF NOT EXISTS idx_appointments_descuento ON appointments(descuento_id, descuento_codigo);
         `);
 
         // 4. Create Studio Config Table
@@ -672,6 +752,142 @@ export async function initDatabase() {
 
           CREATE INDEX IF NOT EXISTS idx_avail_exceptions_fecha ON availability_exceptions(fecha, alcance, profesional_id);
         `);
+
+        // 13. Create Notification Logs Table (Decoupled Notification Service & Idempotency)
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS notification_logs (
+            id VARCHAR(64) PRIMARY KEY,
+            appointment_id VARCHAR(64),
+            channel VARCHAR(32) NOT NULL,
+            recipient VARCHAR(255),
+            notification_type VARCHAR(64) NOT NULL,
+            status VARCHAR(32) NOT NULL,
+            subject TEXT,
+            message TEXT,
+            idempotency_key VARCHAR(128) UNIQUE,
+            error TEXT,
+            sent_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            metadata JSONB
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_notif_logs_apt ON notification_logs(appointment_id);
+          CREATE INDEX IF NOT EXISTS idx_notif_logs_idempotency ON notification_logs(idempotency_key);
+        `);
+
+        // 14. Create Promotions Table
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS promotions (
+            id VARCHAR(64) PRIMARY KEY,
+            codigo VARCHAR(64) NOT NULL UNIQUE,
+            nombre VARCHAR(255) NOT NULL,
+            descripcion TEXT,
+            activo BOOLEAN NOT NULL DEFAULT TRUE,
+            tipo_descuento VARCHAR(32) NOT NULL DEFAULT 'porcentaje',
+            valor_descuento NUMERIC NOT NULL,
+            fecha_inicio VARCHAR(10) NOT NULL,
+            fecha_vencimiento VARCHAR(10),
+            limite_total_usos INTEGER,
+            limite_uso_por_cliente INTEGER,
+            periodo_reutilizacion_dias INTEGER,
+            servicios_aplicables JSONB NOT NULL DEFAULT '["todos"]',
+            monto_minimo NUMERIC,
+            usos_actuales INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_promotions_codigo ON promotions(codigo);
+          CREATE INDEX IF NOT EXISTS idx_promotions_activo ON promotions(activo);
+        `);
+
+        // 15. Create Promotion Usages Table (Audit trail of every public promotion usage)
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS promotion_usages (
+            id VARCHAR(64) PRIMARY KEY,
+            promocion_id VARCHAR(64) NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+            codigo VARCHAR(64) NOT NULL,
+            cliente_id VARCHAR(64),
+            cliente_telefono VARCHAR(64),
+            cliente_email VARCHAR(255),
+            turno_id VARCHAR(64),
+            descuento_aplicado NUMERIC NOT NULL,
+            precio_original NUMERIC NOT NULL,
+            precio_final NUMERIC NOT NULL,
+            fecha_uso TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_promo_usages_promo ON promotion_usages(promocion_id);
+          CREATE INDEX IF NOT EXISTS idx_promo_usages_cliente ON promotion_usages(cliente_id);
+          CREATE INDEX IF NOT EXISTS idx_promo_usages_tel ON promotion_usages(cliente_telefono);
+        `);
+
+        // 16. Create Client Benefits Table (Administrative benefits granted to individual clients)
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS client_benefits (
+            id VARCHAR(64) PRIMARY KEY,
+            cliente_id VARCHAR(64) NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            cliente_nombre VARCHAR(255),
+            cliente_telefono VARCHAR(64),
+            cliente_email VARCHAR(255),
+            titulo VARCHAR(255) NOT NULL,
+            descripcion TEXT,
+            tipo_descuento VARCHAR(32) NOT NULL DEFAULT 'porcentaje',
+            valor_descuento NUMERIC NOT NULL,
+            origen VARCHAR(64) NOT NULL DEFAULT 'admin',
+            origen_detalle TEXT,
+            fecha_emision VARCHAR(10) NOT NULL,
+            fecha_vencimiento VARCHAR(10),
+            estado VARCHAR(32) NOT NULL DEFAULT 'disponible',
+            turno_origen_id VARCHAR(64),
+            turno_origen_codigo VARCHAR(64),
+            turno_uso_id VARCHAR(64),
+            turno_uso_codigo VARCHAR(64),
+            usado_en TIMESTAMP WITH TIME ZONE,
+            servicios_aplicables JSONB NOT NULL DEFAULT '["todos"]',
+            monto_minimo NUMERIC,
+            descuento_aplicado NUMERIC,
+            otorgado_por VARCHAR(255),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_client_benefits_cliente ON client_benefits(cliente_id);
+          CREATE INDEX IF NOT EXISTS idx_client_benefits_estado ON client_benefits(estado);
+          CREATE INDEX IF NOT EXISTS idx_client_benefits_tel ON client_benefits(cliente_telefono);
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_client_benefits_turno_origen ON client_benefits(turno_origen_id) WHERE turno_origen_id IS NOT NULL;
+        `);
+
+        // Seed initial promotions if empty
+        const promoCountRes = await client.query('SELECT COUNT(*) FROM promotions');
+        if (parseInt(promoCountRes.rows[0].count, 10) === 0) {
+          console.log('🌱 Seeding initial promotions to PostgreSQL...');
+          for (const p of defaultPromotions) {
+            await client.query(`
+              INSERT INTO promotions (
+                id, codigo, nombre, descripcion, activo, tipo_descuento, valor_descuento,
+                fecha_inicio, fecha_vencimiento, limite_total_usos, limite_uso_por_cliente,
+                periodo_reutilizacion_dias, servicios_aplicables, monto_minimo, usos_actuales
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+              ON CONFLICT (id) DO NOTHING;
+            `, [
+              p.id,
+              p.codigo,
+              p.nombre,
+              p.descripcion || null,
+              p.activo,
+              p.tipoDescuento,
+              p.valorDescuento,
+              p.fechaInicio,
+              p.fechaVencimiento || null,
+              p.limiteTotalUsos || null,
+              p.limiteUsoPorCliente || null,
+              p.periodoReutilizacionDias || null,
+              JSON.stringify(p.serviciosAplicables || ['todos']),
+              p.montoMinimo || null,
+              p.usosActuales || 0
+            ]);
+          }
+        }
 
         // Seed initial services if empty
         const countRes = await client.query('SELECT COUNT(*) FROM services');
@@ -2052,30 +2268,7 @@ export async function getAppointments(filter?: {
       const query = `SELECT * FROM appointments ${whereClause} ORDER BY fecha ASC, hora_inicio ASC`;
       
       const res = await pgPool.query(query, values);
-      return res.rows.map(row => ({
-        id: row.id,
-        clienteId: row.cliente_id || undefined,
-        profesionalId: row.profesional_id || undefined,
-        profesionalNombre: row.profesional_nombre || undefined,
-        codigo: row.codigo,
-        nombre: row.nombre,
-        apellido: row.apellido,
-        telefono: row.telefono,
-        email: row.email || undefined,
-        servicioId: row.servicio_id,
-        servicioNombre: row.servicio_nombre,
-        duracionMinutos: Number(row.duracion_minutos),
-        precio: Number(row.precio),
-        fecha: row.fecha,
-        horaInicio: row.hora_inicio,
-        horaFin: row.hora_fin,
-        observaciones: row.observaciones || undefined,
-        estado: row.estado as any,
-        notasAdmin: row.notas_admin || undefined,
-        browserId: row.browser_id || undefined,
-        createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-        updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
-      }));
+      return res.rows.map(row => mapAppointmentRow(row));
     } catch (err) {
       console.error('Error fetching appointments from PostgreSQL:', err);
     }
@@ -2102,6 +2295,65 @@ export async function getAppointments(filter?: {
   return filtered.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.horaInicio.localeCompare(b.horaInicio));
 }
 
+export async function getAppointmentById(id: string): Promise<Appointment | null> {
+  const cleanId = (id || '').trim();
+  if (!cleanId) return null;
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query('SELECT * FROM appointments WHERE id = $1 OR codigo = $1 LIMIT 1', [cleanId]);
+      if (res.rows.length > 0) {
+        return mapAppointmentRow(res.rows[0]);
+      }
+      return null;
+    } catch (err) {
+      console.error('Error fetching appointment by ID from PostgreSQL:', err);
+    }
+  }
+
+  const found = memoryDb.appointments.find(a => a.id === cleanId || a.codigo === cleanId);
+  return found || null;
+}
+
+function mapAppointmentRow(row: any): Appointment {
+  return {
+    id: row.id,
+    clienteId: row.cliente_id || undefined,
+    profesionalId: row.profesional_id || undefined,
+    profesionalNombre: row.profesional_nombre || undefined,
+    codigo: row.codigo,
+    nombre: row.nombre,
+    apellido: row.apellido,
+    telefono: row.telefono,
+    email: row.email || undefined,
+    servicioId: row.servicio_id,
+    servicioNombre: row.servicio_nombre,
+    duracionMinutos: Number(row.duracion_minutos),
+    precio: Number(row.precio),
+    fecha: row.fecha,
+    horaInicio: row.hora_inicio,
+    horaFin: row.hora_fin,
+    observaciones: row.observaciones || undefined,
+    estado: row.estado as any,
+    notasAdmin: row.notas_admin || undefined,
+    browserId: row.browser_id || undefined,
+    descuentoTipo: row.descuento_tipo || undefined,
+    descuentoId: row.descuento_id || undefined,
+    descuentoCodigo: row.descuento_codigo || undefined,
+    descuentoNombre: row.descuento_nombre || undefined,
+    descuentoPorcentaje: row.descuento_porcentaje != null ? Number(row.descuento_porcentaje) : undefined,
+    descuentoMonto: row.descuento_monto != null ? Number(row.descuento_monto) : undefined,
+    precioOriginal: row.precio_original != null ? Number(row.precio_original) : Number(row.precio),
+    precioFinal: row.precio_final != null ? Number(row.precio_final) : Number(row.precio),
+    motivoCancelacion: row.motivo_cancelacion || undefined,
+    canceladoEn: row.cancelado_en ? new Date(row.cancelado_en).toISOString() : undefined,
+    canceladoOrigen: row.cancelado_origen || undefined,
+    canceladoPor: row.cancelado_por || undefined,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
+  };
+}
+
 export async function createAppointment(apt: Appointment): Promise<Appointment> {
   // Ensure client exists and link client_id
   if (!apt.clienteId) {
@@ -2114,6 +2366,13 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
       browserId: apt.browserId
     });
     apt.clienteId = client.id;
+  }
+
+  // Determine base pricing defaults
+  const originalPrice = Number(apt.precioOriginal ?? apt.precio);
+  apt.precioOriginal = originalPrice;
+  if (apt.precioFinal == null) {
+    apt.precioFinal = originalPrice;
   }
 
   if (isPostgresConnected && pgPool) {
@@ -2138,13 +2397,249 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
         }
       }
 
+      // ---------------------------------------------------------------------
+      // TRANSACTIONAL DISCOUNT / BENEFIT CONSUMPTION & RE-VALIDATION
+      // ---------------------------------------------------------------------
+      if (apt.descuentoCodigo || apt.descuentoTipo === 'promocion') {
+        const promoCode = (apt.descuentoCodigo || '').trim().toUpperCase();
+        const promoRes = await client.query(`
+          SELECT * FROM promotions WHERE UPPER(codigo) = $1 FOR UPDATE
+        `, [promoCode]);
+
+        if (promoRes.rows.length === 0) {
+          await client.query('ROLLBACK');
+          throw new Error(`El código promocional "${promoCode}" no existe.`);
+        }
+
+        const promo = promoRes.rows[0];
+        if (!promo.activo) {
+          await client.query('ROLLBACK');
+          throw new Error(`La promoción "${promo.nombre}" ya no se encuentra activa.`);
+        }
+
+        const todayStr = apt.fecha || new Date().toISOString().split('T')[0];
+        if (promo.fecha_inicio && todayStr < promo.fecha_inicio) {
+          await client.query('ROLLBACK');
+          throw new Error(`La promoción "${promo.nombre}" aún no está vigente (inicia el ${promo.fecha_inicio}).`);
+        }
+        if (promo.fecha_vencimiento && todayStr > promo.fecha_vencimiento) {
+          await client.query('ROLLBACK');
+          throw new Error(`La promoción "${promo.nombre}" ha vencido el ${promo.fecha_vencimiento}.`);
+        }
+
+        // Total usage limit check
+        if (promo.limite_total_usos != null && promo.limite_total_usos > 0) {
+          const totalUsageCount = Number(promo.usos_actuales || 0);
+          if (totalUsageCount >= promo.limite_total_usos) {
+            await client.query('ROLLBACK');
+            throw new Error(`La promoción "${promo.nombre}" ha alcanzado el límite máximo de usos disponibles.`);
+          }
+        }
+
+        // Applicable services check
+        const applicableServices: string[] = typeof promo.servicios_aplicables === 'string'
+          ? JSON.parse(promo.servicios_aplicables)
+          : (promo.servicios_aplicables || ['todos']);
+        if (applicableServices.length > 0 && !applicableServices.includes('todos')) {
+          if (!applicableServices.includes(apt.servicioId)) {
+            await client.query('ROLLBACK');
+            throw new Error(`La promoción "${promo.nombre}" no aplica para el servicio seleccionado.`);
+          }
+        }
+
+        // Minimum amount check
+        if (promo.monto_minimo != null && promo.monto_minimo > 0) {
+          if (originalPrice < Number(promo.monto_minimo)) {
+            await client.query('ROLLBACK');
+            throw new Error(`La promoción "${promo.nombre}" requiere un monto mínimo de $${Number(promo.monto_minimo).toLocaleString('es-AR')}.`);
+          }
+        }
+
+        // Per-client usage limit & reuse period checks
+        const phoneNorm = normalizePhone(apt.telefono);
+        const cleanPhone = phoneNorm.canonical || phoneNorm.nationalDigits || apt.telefono;
+        const cleanEmail = normalizeEmail(apt.email || '');
+        const clientUsagesRes = await client.query(`
+          SELECT * FROM promotion_usages
+          WHERE promocion_id = $1 AND (
+            ($2::varchar IS NOT NULL AND cliente_id = $2) OR
+            ($3::varchar != '' AND cliente_telefono = $3) OR
+            ($4::varchar != '' AND cliente_email = $4)
+          )
+          ORDER BY fecha_uso DESC
+        `, [promo.id, apt.clienteId || null, cleanPhone, cleanEmail]);
+
+        const clientUsages = clientUsagesRes.rows;
+
+        // Reuse period in days check
+        if (promo.periodo_reutilizacion_dias != null && promo.periodo_reutilizacion_dias > 0 && clientUsages.length > 0) {
+          const lastUsage = clientUsages[0];
+          const lastDate = new Date(lastUsage.fecha_uso).getTime();
+          const nowMs = Date.now();
+          const daysElapsed = (nowMs - lastDate) / (1000 * 60 * 60 * 24);
+          if (daysElapsed < promo.periodo_reutilizacion_dias) {
+            const reusableDate = new Date(lastDate + promo.periodo_reutilizacion_dias * 86400000);
+            await client.query('ROLLBACK');
+            throw new Error(`Ya has utilizado esta promoción. Podrás volver a utilizarla a partir del ${reusableDate.toLocaleDateString('es-AR')}.`);
+          }
+        }
+
+        // Per-client limit check
+        if (promo.limite_uso_por_cliente != null && promo.limite_uso_por_cliente > 0) {
+          if (clientUsages.length >= promo.limite_uso_por_cliente) {
+            await client.query('ROLLBACK');
+            throw new Error(`Ya has alcanzado el límite de usos permitidos (${promo.limite_uso_por_cliente}) para esta promoción.`);
+          }
+        }
+
+        // Calculate discount amount
+        let calculatedDiscount = 0;
+        const discountVal = Number(promo.valor_descuento);
+        if (promo.tipo_descuento === 'porcentaje') {
+          calculatedDiscount = Math.round(originalPrice * (discountVal / 100));
+          apt.descuentoPorcentaje = discountVal;
+        } else {
+          calculatedDiscount = discountVal;
+        }
+        calculatedDiscount = Math.min(originalPrice, Math.max(0, calculatedDiscount));
+
+        apt.descuentoTipo = 'promocion';
+        apt.descuentoId = promo.id;
+        apt.descuentoCodigo = promo.codigo;
+        apt.descuentoNombre = promo.nombre;
+        apt.descuentoMonto = calculatedDiscount;
+        apt.precioFinal = Math.max(0, originalPrice - calculatedDiscount);
+
+        // Record usage in promotion_usages
+        const usageId = crypto.randomUUID();
+        await client.query(`
+          INSERT INTO promotion_usages (
+            id, promocion_id, codigo, cliente_id, cliente_telefono, cliente_email,
+            turno_id, descuento_aplicado, precio_original, precio_final, fecha_uso
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+        `, [
+          usageId,
+          promo.id,
+          promo.codigo,
+          apt.clienteId || null,
+          cleanPhone,
+          cleanEmail || null,
+          apt.id,
+          calculatedDiscount,
+          originalPrice,
+          apt.precioFinal
+        ]);
+
+        // Increment promotion usage count
+        await client.query(`
+          UPDATE promotions SET usos_actuales = usos_actuales + 1, updated_at = NOW() WHERE id = $1
+        `, [promo.id]);
+
+      } else if (apt.descuentoId && apt.descuentoTipo === 'beneficio') {
+        // Individual client benefit consumption
+        const benefitRes = await client.query(`
+          SELECT * FROM client_benefits WHERE id = $1 FOR UPDATE
+        `, [apt.descuentoId]);
+
+        if (benefitRes.rows.length === 0) {
+          await client.query('ROLLBACK');
+          throw new Error('El beneficio seleccionado no existe.');
+        }
+
+        const benefit = benefitRes.rows[0];
+        if (benefit.estado !== 'disponible') {
+          await client.query('ROLLBACK');
+          throw new Error(`Este beneficio ya no se encuentra disponible (estado: ${benefit.estado}).`);
+        }
+
+        // Verify client matching
+        const phoneNorm = normalizePhone(apt.telefono);
+        const cleanPhone = phoneNorm.canonical || phoneNorm.nationalDigits || apt.telefono;
+        const benefitPhoneNorm = normalizePhone(benefit.cliente_telefono || '');
+        const cleanBenefitPhone = benefitPhoneNorm.canonical || benefitPhoneNorm.nationalDigits || (benefit.cliente_telefono || '');
+        if (apt.clienteId && benefit.cliente_id && apt.clienteId !== benefit.cliente_id && cleanPhone !== cleanBenefitPhone) {
+          await client.query('ROLLBACK');
+          throw new Error('El beneficio seleccionado pertenece a otra clienta.');
+        }
+
+        const todayStr = apt.fecha || new Date().toISOString().split('T')[0];
+        if (benefit.fecha_vencimiento && todayStr > benefit.fecha_vencimiento) {
+          await client.query('UPDATE client_benefits SET estado = \'vencido\', updated_at = NOW() WHERE id = $1', [benefit.id]);
+          await client.query('ROLLBACK');
+          throw new Error(`Este beneficio ha vencido el ${benefit.fecha_vencimiento}.`);
+        }
+
+        // Applicable services check
+        const applicableServices: string[] = typeof benefit.servicios_aplicables === 'string'
+          ? JSON.parse(benefit.servicios_aplicables)
+          : (benefit.servicios_aplicables || ['todos']);
+        if (applicableServices.length > 0 && !applicableServices.includes('todos')) {
+          if (!applicableServices.includes(apt.servicioId)) {
+            await client.query('ROLLBACK');
+            throw new Error(`Este beneficio no aplica para el servicio seleccionado.`);
+          }
+        }
+
+        // Minimum amount check
+        if (benefit.monto_minimo != null && benefit.monto_minimo > 0) {
+          if (originalPrice < Number(benefit.monto_minimo)) {
+            await client.query('ROLLBACK');
+            throw new Error(`Este beneficio requiere un monto mínimo de $${Number(benefit.monto_minimo).toLocaleString('es-AR')}.`);
+          }
+        }
+
+        // Calculate discount
+        let calculatedDiscount = 0;
+        const discountVal = Number(benefit.valor_descuento);
+        if (benefit.tipo_descuento === 'porcentaje') {
+          calculatedDiscount = Math.round(originalPrice * (discountVal / 100));
+          apt.descuentoPorcentaje = discountVal;
+        } else {
+          calculatedDiscount = discountVal;
+        }
+        calculatedDiscount = Math.min(originalPrice, Math.max(0, calculatedDiscount));
+
+        apt.descuentoTipo = 'beneficio';
+        apt.descuentoId = benefit.id;
+        apt.descuentoNombre = benefit.titulo;
+        apt.descuentoMonto = calculatedDiscount;
+        apt.precioFinal = Math.max(0, originalPrice - calculatedDiscount);
+
+        // Mark benefit as used atomically
+        await client.query(`
+          UPDATE client_benefits
+          SET estado = 'usado',
+              turno_uso_id = $1,
+              turno_uso_codigo = $2,
+              usado_en = NOW(),
+              descuento_aplicado = $3,
+              updated_at = NOW()
+          WHERE id = $4
+        `, [apt.id, apt.codigo, calculatedDiscount, benefit.id]);
+      } else {
+        // No discount
+        apt.precioFinal = originalPrice;
+        apt.descuentoMonto = 0;
+      }
+
       await client.query(`
         INSERT INTO appointments (
           id, cliente_id, profesional_id, profesional_nombre, codigo, nombre, apellido, telefono, email,
           servicio_id, servicio_nombre, duracion_minutos, precio,
           fecha, hora_inicio, hora_fin, observaciones, estado,
-          notas_admin, browser_id, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NOW(), NOW())
+          notas_admin, browser_id,
+          descuento_tipo, descuento_id, descuento_codigo, descuento_nombre,
+          descuento_porcentaje, descuento_monto, precio_original, precio_final,
+          created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9,
+          $10, $11, $12, $13,
+          $14, $15, $16, $17, $18,
+          $19, $20,
+          $21, $22, $23, $24,
+          $25, $26, $27, $28,
+          NOW(), NOW()
+        )
       `, [
         apt.id,
         apt.clienteId,
@@ -2158,14 +2653,22 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
         apt.servicioId,
         apt.servicioNombre,
         apt.duracionMinutos,
-        apt.precio,
+        apt.precioFinal, // Main precio stored is effective price
         apt.fecha,
         apt.horaInicio,
         apt.horaFin,
         apt.observaciones || null,
         apt.estado,
         apt.notasAdmin || null,
-        apt.browserId || null
+        apt.browserId || null,
+        apt.descuentoTipo || null,
+        apt.descuentoId || null,
+        apt.descuentoCodigo || null,
+        apt.descuentoNombre || null,
+        apt.descuentoPorcentaje || null,
+        apt.descuentoMonto || null,
+        apt.precioOriginal || originalPrice,
+        apt.precioFinal || originalPrice
       ]);
 
       await client.query('COMMIT');
@@ -2190,6 +2693,158 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
     if (existingOverlap) {
       throw new Error('El horario seleccionado ya ha sido reservado por otra solicitud simultánea. Por favor elegí otro horario.');
     }
+  }
+
+  // Fallback memory discount validation & consumption
+  if (apt.descuentoCodigo || apt.descuentoTipo === 'promocion') {
+    const promoCode = (apt.descuentoCodigo || '').trim().toUpperCase();
+    const promo = memoryDb.promotions?.find(p => p.codigo.toUpperCase() === promoCode);
+    if (!promo || !promo.activo) {
+      throw new Error(`Código promocional "${promoCode}" inválido o inactivo.`);
+    }
+
+    const todayStr = apt.fecha || new Date().toISOString().split('T')[0];
+    if (promo.fechaInicio && todayStr < promo.fechaInicio) {
+      throw new Error(`Esta promoción aún no está vigente (comienza el ${promo.fechaInicio}).`);
+    }
+    if (promo.fechaVencimiento && todayStr > promo.fechaVencimiento) {
+      throw new Error(`Esta promoción ha vencido el ${promo.fechaVencimiento}.`);
+    }
+
+    // Check total usage limit
+    if (promo.limiteTotalUsos != null && promo.limiteTotalUsos > 0) {
+      const currentUsages = promo.usosActuales || 0;
+      if (currentUsages >= promo.limiteTotalUsos) {
+        throw new Error(`Esta promoción ha alcanzado su límite total de usos disponibles (${promo.limiteTotalUsos}).`);
+      }
+    }
+
+    // Check service applicability
+    if (promo.serviciosAplicables && promo.serviciosAplicables.length > 0 && !promo.serviciosAplicables.includes('todos')) {
+      if (!promo.serviciosAplicables.includes(apt.servicioId)) {
+        throw new Error(`La promoción "${promo.nombre}" no aplica para el servicio seleccionado.`);
+      }
+    }
+
+    // Check minimum amount
+    if (promo.montoMinimo != null && promo.montoMinimo > 0) {
+      if (originalPrice < promo.montoMinimo) {
+        throw new Error(`La promoción "${promo.nombre}" requiere un monto mínimo de $${promo.montoMinimo.toLocaleString('es-AR')}.`);
+      }
+    }
+
+    // Check per-client limits and reuse cooldown
+    const phoneNorm = normalizePhone(apt.telefono);
+    const cleanPhone = phoneNorm.canonical || phoneNorm.nationalDigits || apt.telefono;
+    const cleanEmail = normalizeEmail(apt.email || '');
+
+    const clientUsages = (memoryDb.promotionUsages || []).filter(u =>
+      u.promocionId === promo.id && (
+        (apt.clienteId && u.clienteId === apt.clienteId) ||
+        (cleanPhone && u.clienteTelefono === cleanPhone) ||
+        (cleanEmail && u.clienteEmail === cleanEmail)
+      )
+    ).sort((a, b) => b.fechaUso.localeCompare(a.fechaUso));
+
+    if (promo.periodoReutilizacionDias != null && promo.periodoReutilizacionDias > 0 && clientUsages.length > 0) {
+      const lastUsage = clientUsages[0];
+      const lastDate = new Date(lastUsage.fechaUso).getTime();
+      const nowMs = Date.now();
+      const daysElapsed = (nowMs - lastDate) / (1000 * 60 * 60 * 24);
+      if (daysElapsed < promo.periodoReutilizacionDias) {
+        const reusableDate = new Date(lastDate + promo.periodoReutilizacionDias * 86400000);
+        throw new Error(`Ya has utilizado esta promoción. Podrás volver a utilizarla a partir del ${reusableDate.toLocaleDateString('es-AR')}.`);
+      }
+    }
+
+    if (promo.limiteUsoPorCliente != null && promo.limiteUsoPorCliente > 0) {
+      if (clientUsages.length >= promo.limiteUsoPorCliente) {
+        throw new Error(`Ya has alcanzado el límite de usos permitidos (${promo.limiteUsoPorCliente}) para esta promoción.`);
+      }
+    }
+
+    let calculatedDiscount = 0;
+    if (promo.tipoDescuento === 'porcentaje') {
+      calculatedDiscount = Math.round(originalPrice * (promo.valorDescuento / 100));
+      apt.descuentoPorcentaje = promo.valorDescuento;
+    } else {
+      calculatedDiscount = promo.valorDescuento;
+    }
+    calculatedDiscount = Math.min(originalPrice, Math.max(0, calculatedDiscount));
+    apt.descuentoTipo = 'promocion';
+    apt.descuentoId = promo.id;
+    apt.descuentoCodigo = promo.codigo;
+    apt.descuentoNombre = promo.nombre;
+    apt.descuentoMonto = calculatedDiscount;
+    apt.precioFinal = Math.max(0, originalPrice - calculatedDiscount);
+    promo.usosActuales = (promo.usosActuales || 0) + 1;
+    if (!memoryDb.promotionUsages) memoryDb.promotionUsages = [];
+    memoryDb.promotionUsages.unshift({
+      id: crypto.randomUUID(),
+      promocionId: promo.id,
+      codigo: promo.codigo,
+      clienteId: apt.clienteId,
+      clienteTelefono: cleanPhone,
+      clienteEmail: cleanEmail,
+      turnoId: apt.id,
+      descuentoAplicado: calculatedDiscount,
+      precioOriginal: originalPrice,
+      precioFinal: apt.precioFinal,
+      fechaUso: new Date().toISOString()
+    });
+  } else if (apt.descuentoId && apt.descuentoTipo === 'beneficio') {
+    const benefit = memoryDb.clientBenefits?.find(b => b.id === apt.descuentoId);
+    if (!benefit || benefit.estado !== 'disponible') {
+      throw new Error('Beneficio no disponible o inválido.');
+    }
+
+    const todayStr = apt.fecha || new Date().toISOString().split('T')[0];
+    if (benefit.fechaVencimiento && todayStr > benefit.fechaVencimiento) {
+      benefit.estado = 'vencido';
+      throw new Error(`Este beneficio ha vencido el ${benefit.fechaVencimiento}.`);
+    }
+
+    const phoneNorm = normalizePhone(apt.telefono);
+    const cleanPhone = phoneNorm.canonical || phoneNorm.nationalDigits || apt.telefono;
+    const benefitPhoneNorm = normalizePhone(benefit.clienteTelefono || '');
+    const cleanBenefitPhone = benefitPhoneNorm.canonical || benefitPhoneNorm.nationalDigits || (benefit.clienteTelefono || '');
+    if (apt.clienteId && benefit.clienteId && apt.clienteId !== benefit.clienteId && cleanPhone !== cleanBenefitPhone) {
+      throw new Error('El beneficio seleccionado pertenece a otra clienta.');
+    }
+
+    if (benefit.serviciosAplicables && benefit.serviciosAplicables.length > 0 && !benefit.serviciosAplicables.includes('todos')) {
+      if (!benefit.serviciosAplicables.includes(apt.servicioId)) {
+        throw new Error('Este beneficio no aplica para el servicio seleccionado.');
+      }
+    }
+
+    if (benefit.montoMinimo != null && benefit.montoMinimo > 0) {
+      if (originalPrice < benefit.montoMinimo) {
+        throw new Error(`Este beneficio requiere un monto mínimo de $${benefit.montoMinimo.toLocaleString('es-AR')}.`);
+      }
+    }
+
+    let calculatedDiscount = 0;
+    if (benefit.tipoDescuento === 'porcentaje') {
+      calculatedDiscount = Math.round(originalPrice * (benefit.valorDescuento / 100));
+      apt.descuentoPorcentaje = benefit.valorDescuento;
+    } else {
+      calculatedDiscount = benefit.valorDescuento;
+    }
+    calculatedDiscount = Math.min(originalPrice, Math.max(0, calculatedDiscount));
+    apt.descuentoTipo = 'beneficio';
+    apt.descuentoId = benefit.id;
+    apt.descuentoNombre = benefit.titulo;
+    apt.descuentoMonto = calculatedDiscount;
+    apt.precioFinal = Math.max(0, originalPrice - calculatedDiscount);
+    benefit.estado = 'usado';
+    benefit.turnoUsoId = apt.id;
+    benefit.turnoUsoCodigo = apt.codigo;
+    benefit.usadoEn = new Date().toISOString();
+    benefit.descuentoAplicado = calculatedDiscount;
+  } else {
+    apt.precioFinal = originalPrice;
+    apt.descuentoMonto = 0;
   }
 
   memoryDb.appointments.unshift(apt);
@@ -2218,6 +2873,10 @@ export async function updateAppointment(id: string, updates: Partial<Appointment
               cliente_id = COALESCE($7, cliente_id),
               profesional_id = COALESCE($8, profesional_id),
               profesional_nombre = COALESCE($9, profesional_nombre),
+              motivo_cancelacion = CASE WHEN $2 = 'pendiente' THEN NULL ELSE COALESCE($10, motivo_cancelacion) END,
+              cancelado_en = CASE WHEN $2 = 'pendiente' THEN NULL ELSE COALESCE($11, cancelado_en) END,
+              cancelado_origen = CASE WHEN $2 = 'pendiente' THEN NULL ELSE COALESCE($12, cancelado_origen) END,
+              cancelado_por = CASE WHEN $2 = 'pendiente' THEN NULL ELSE COALESCE($13, cancelado_por) END,
               updated_at = NOW()
           WHERE id = $1
         `, [
@@ -2229,36 +2888,17 @@ export async function updateAppointment(id: string, updates: Partial<Appointment
           updates.horaFin || null,
           updates.clienteId || null,
           updates.profesionalId || null,
-          updates.profesionalNombre || null
+          updates.profesionalNombre || null,
+          updates.motivoCancelacion || null,
+          updates.canceladoEn || null,
+          updates.canceladoOrigen || null,
+          updates.canceladoPor || null
         ]);
 
         const updatedRes = await pgPool.query('SELECT * FROM appointments WHERE id = $1', [targetId]);
         const row = updatedRes.rows[0];
         if (row) {
-          updatedApt = {
-            id: row.id,
-            clienteId: row.cliente_id || undefined,
-            profesionalId: row.profesional_id || undefined,
-            profesionalNombre: row.profesional_nombre || undefined,
-            codigo: row.codigo,
-            nombre: row.nombre,
-            apellido: row.apellido,
-            telefono: row.telefono,
-            email: row.email || undefined,
-            servicioId: row.servicio_id,
-            servicioNombre: row.servicio_nombre,
-            duracionMinutos: Number(row.duracion_minutos),
-            precio: Number(row.precio),
-            fecha: row.fecha,
-            horaInicio: row.hora_inicio,
-            horaFin: row.hora_fin,
-            observaciones: row.observaciones || undefined,
-            estado: row.estado as any,
-            notasAdmin: row.notas_admin || undefined,
-            browserId: row.browser_id || undefined,
-            createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-            updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
-          };
+          updatedApt = mapAppointmentRow(row);
         }
       }
     } catch (err) {
@@ -2269,7 +2909,15 @@ export async function updateAppointment(id: string, updates: Partial<Appointment
   // Also update memoryDb
   const apt = memoryDb.appointments.find(a => a.id === cleanId || a.codigo === cleanId);
   if (apt) {
-    if (updates.estado) apt.estado = updates.estado;
+    if (updates.estado) {
+      apt.estado = updates.estado;
+      if (updates.estado === 'pendiente') {
+        apt.motivoCancelacion = undefined;
+        apt.canceladoEn = undefined;
+        apt.canceladoOrigen = undefined;
+        apt.canceladoPor = undefined;
+      }
+    }
     if (updates.notasAdmin !== undefined) apt.notasAdmin = updates.notasAdmin;
     if (updates.fecha) apt.fecha = updates.fecha;
     if (updates.horaInicio) apt.horaInicio = updates.horaInicio;
@@ -2277,6 +2925,10 @@ export async function updateAppointment(id: string, updates: Partial<Appointment
     if (updates.clienteId) apt.clienteId = updates.clienteId;
     if (updates.profesionalId) apt.profesionalId = updates.profesionalId;
     if (updates.profesionalNombre) apt.profesionalNombre = updates.profesionalNombre;
+    if (updates.motivoCancelacion !== undefined) apt.motivoCancelacion = updates.motivoCancelacion;
+    if (updates.canceladoEn !== undefined) apt.canceladoEn = updates.canceladoEn;
+    if (updates.canceladoOrigen !== undefined) apt.canceladoOrigen = updates.canceladoOrigen;
+    if (updates.canceladoPor !== undefined) apt.canceladoPor = updates.canceladoPor;
     apt.updatedAt = new Date().toISOString();
     saveLocalFileDb();
     if (!updatedApt) {
@@ -2287,27 +2939,97 @@ export async function updateAppointment(id: string, updates: Partial<Appointment
   return updatedApt;
 }
 
-export async function deleteAppointment(id: string): Promise<boolean> {
-  const cleanId = (id || '').trim();
-  let deletedFromPg = false;
+export interface CancelAppointmentOptions {
+  appointmentId: string;
+  motivo?: string;
+  origen?: 'agenda' | 'detalle_turno' | 'excepcion_disponibilidad' | 'admin' | 'cliente' | string;
+  canceladoPor?: string;
+}
+
+export async function cancelAppointment(options: CancelAppointmentOptions): Promise<Appointment | null> {
+  const cleanId = (options.appointmentId || '').trim();
+  const motivo = (options.motivo || '').trim() || 'Cancelado por administración';
+  const origen = (options.origen || 'admin').trim();
+  const canceladoPor = (options.canceladoPor || 'Administración').trim();
+  const canceladoEn = new Date().toISOString();
+
+  let updatedApt: Appointment | null = null;
+
   if (isPostgresConnected && pgPool) {
     try {
-      const res = await pgPool.query('DELETE FROM appointments WHERE id = $1 OR codigo = $1', [cleanId]);
-      deletedFromPg = (res.rowCount ?? 0) > 0;
+      const currentRes = await pgPool.query('SELECT * FROM appointments WHERE id = $1 OR codigo = $1', [cleanId]);
+      if (currentRes.rows.length > 0) {
+        const curr = currentRes.rows[0];
+        const targetId = curr.id;
+
+        await pgPool.query(`
+          UPDATE appointments
+          SET estado = 'cancelado',
+              motivo_cancelacion = $2,
+              cancelado_en = $3,
+              cancelado_origen = $4,
+              cancelado_por = $5,
+              updated_at = NOW()
+          WHERE id = $1
+        `, [
+          targetId,
+          motivo,
+          canceladoEn,
+          origen,
+          canceladoPor
+        ]);
+
+        const updatedRes = await pgPool.query('SELECT * FROM appointments WHERE id = $1', [targetId]);
+        const row = updatedRes.rows[0];
+        if (row) {
+          updatedApt = mapAppointmentRow(row);
+        }
+      }
     } catch (err) {
-      console.error('Error deleting appointment from PostgreSQL:', err);
+      console.error('Error cancelling appointment in PostgreSQL:', err);
     }
   }
 
-  let deletedFromMem = false;
-  const idx = memoryDb.appointments.findIndex(a => a.id === cleanId || a.codigo === cleanId);
-  if (idx !== -1) {
-    memoryDb.appointments.splice(idx, 1);
+  // Also update memoryDb
+  const apt = memoryDb.appointments.find(a => a.id === cleanId || a.codigo === cleanId);
+  if (apt) {
+    apt.estado = 'cancelado';
+    apt.motivoCancelacion = motivo;
+    apt.canceladoEn = canceladoEn;
+    apt.canceladoOrigen = origen;
+    apt.canceladoPor = canceladoPor;
+    apt.updatedAt = canceladoEn;
     saveLocalFileDb();
-    deletedFromMem = true;
+    if (!updatedApt) {
+      updatedApt = apt;
+    }
   }
 
-  return deletedFromPg || deletedFromMem;
+  if (updatedApt) {
+    try {
+      const { notificationService } = await import('./notifications/notificationService.js');
+      await notificationService.sendAppointmentCancellation(updatedApt, {
+        motivo,
+        origen,
+        canceladoPor,
+        idempotencyKey: `cancel-${updatedApt.id}-${updatedApt.canceladoEn}`
+      });
+    } catch (notifErr) {
+      console.error('Error in notificationService.sendAppointmentCancellation:', notifErr);
+    }
+  }
+
+  return updatedApt;
+}
+
+export async function deleteAppointment(id: string, motivo = 'Cancelado y archivado por administración', canceladoPor = 'Administración'): Promise<boolean> {
+  const res = await cancelAppointment({
+    appointmentId: id,
+    motivo,
+    origen: 'admin',
+    canceladoPor
+  });
+  return res !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -3177,19 +3899,80 @@ export async function extendStudioScheduleForDate(
 // ---------------------------------------------------------------------------
 
 export async function getStudioConfig(): Promise<StudioConfig> {
+  let conf: any = { ...defaultStudioConfig };
   if (isPostgresConnected && pgPool) {
     try {
       const res = await pgPool.query('SELECT config FROM studio_config WHERE id = $1', ['default']);
       if (res.rows.length > 0) {
-        const conf = typeof res.rows[0].config === 'string' ? JSON.parse(res.rows[0].config) : res.rows[0].config;
-        return { ...defaultStudioConfig, ...conf };
+        conf = typeof res.rows[0].config === 'string' ? JSON.parse(res.rows[0].config) : res.rows[0].config;
       }
     } catch (err) {
       console.error('Error fetching config from PostgreSQL:', err);
+      conf = memoryDb.config || defaultStudioConfig;
     }
+  } else {
+    conf = memoryDb.config || defaultStudioConfig;
   }
 
-  return memoryDb.config;
+  // Migrate legacy blocks if present
+  let needsConfigUpdate = false;
+  if (conf.diasBloqueados && Array.isArray(conf.diasBloqueados) && conf.diasBloqueados.length > 0) {
+    for (const fecha of conf.diasBloqueados) {
+      try {
+        const existing = await getAvailabilityExceptions({ fecha, alcance: 'local' });
+        if (!existing.some(e => e.tipo === 'cerrado')) {
+          await createAvailabilityException({
+            alcance: 'local',
+            fecha,
+            tipo: 'cerrado',
+            motivo: 'Día cerrado (migrado de legado)'
+          });
+        }
+      } catch (e) {}
+    }
+    delete conf.diasBloqueados;
+    needsConfigUpdate = true;
+  }
+  if (conf.bloqueosDetallados && Array.isArray(conf.bloqueosDetallados) && conf.bloqueosDetallados.length > 0) {
+    for (const block of conf.bloqueosDetallados) {
+      try {
+        const existing = await getAvailabilityExceptions({ fecha: block.fecha, alcance: block.profesionalId ? 'profesional' : 'local', profesionalId: block.profesionalId });
+        if (!existing.some(e => e.tipo === 'cerrado')) {
+          await createAvailabilityException({
+            alcance: block.profesionalId ? 'profesional' : 'local',
+            profesionalId: block.profesionalId || undefined,
+            fecha: block.fecha,
+            tipo: block.tipo === 'dia_completo' ? 'cerrado' : 'horario_especial',
+            intervalos: block.horaInicio && block.horaFin ? [{ inicio: block.horaInicio, fin: block.horaFin }] : [],
+            motivo: block.motivo || 'Bloqueo (migrado de legado)'
+          });
+        }
+      } catch (e) {}
+    }
+    delete conf.bloqueosDetallados;
+    needsConfigUpdate = true;
+  }
+  if (conf.horariosBloqueados) {
+    delete conf.horariosBloqueados;
+    needsConfigUpdate = true;
+  }
+
+  if (needsConfigUpdate) {
+    try {
+      if (isPostgresConnected && pgPool) {
+        await pgPool.query(`
+          INSERT INTO studio_config (id, config, updated_at)
+          VALUES ($1, $2, NOW())
+          ON CONFLICT (id) DO UPDATE SET config = $2, updated_at = NOW();
+        `, ['default', JSON.stringify(conf)]);
+      } else {
+        memoryDb.config = { ...defaultStudioConfig, ...conf };
+        saveLocalFileDb();
+      }
+    } catch (e) {}
+  }
+
+  return { ...defaultStudioConfig, ...conf };
 }
 
 export async function updateStudioConfig(updates: Partial<StudioConfig>): Promise<StudioConfig> {
@@ -3216,5 +3999,1119 @@ export async function updateStudioConfig(updates: Partial<StudioConfig>): Promis
 
 export function isDatabasePostgres(): boolean {
   return isPostgresConnected;
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATION LOGS & IDEMPOTENCY
+// ---------------------------------------------------------------------------
+
+export async function isNotificationAlreadySent(idempotencyKey: string, channel: string): Promise<boolean> {
+  const cleanKey = (idempotencyKey || '').trim();
+  if (!cleanKey) return false;
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query(
+        `SELECT id FROM notification_logs WHERE idempotency_key = $1 AND channel = $2 AND status = 'sent' LIMIT 1`,
+        [cleanKey, channel]
+      );
+      if (res.rows.length > 0) return true;
+    } catch (err) {
+      console.error('Error checking notification idempotency in PostgreSQL:', err);
+    }
+  }
+
+  const logs = memoryDb.notificationLogs || [];
+  return logs.some(l => l.idempotencyKey === cleanKey && l.channel === channel && l.status === 'sent');
+}
+
+export async function createNotificationLog(log: NotificationLog): Promise<NotificationLog> {
+  const now = log.sentAt || new Date().toISOString();
+  const entry: NotificationLog = {
+    ...log,
+    sentAt: now
+  };
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      await pgPool.query(`
+        INSERT INTO notification_logs (
+          id, appointment_id, channel, recipient, notification_type, status,
+          subject, message, idempotency_key, error, sent_at, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (idempotency_key) DO UPDATE SET
+          status = $6,
+          sent_at = $11,
+          error = $10,
+          metadata = $12
+      `, [
+        entry.id,
+        entry.appointmentId || null,
+        entry.channel,
+        entry.recipient || null,
+        entry.notificationType,
+        entry.status,
+        entry.subject || null,
+        entry.message || null,
+        entry.idempotencyKey || null,
+        entry.error || null,
+        now,
+        JSON.stringify(entry.metadata || {})
+      ]);
+    } catch (err) {
+      console.error('Error persisting notification log to PostgreSQL:', err);
+    }
+  }
+
+  if (!memoryDb.notificationLogs) memoryDb.notificationLogs = [];
+  const existingIdx = entry.idempotencyKey
+    ? memoryDb.notificationLogs.findIndex(l => l.idempotencyKey === entry.idempotencyKey && l.channel === entry.channel)
+    : -1;
+  if (existingIdx !== -1) {
+    memoryDb.notificationLogs[existingIdx] = entry;
+  } else {
+    memoryDb.notificationLogs.unshift(entry);
+  }
+  saveLocalFileDb();
+
+  return entry;
+}
+
+export async function getNotificationLogs(filter?: {
+  appointmentId?: string;
+  channel?: string;
+  limit?: number;
+}): Promise<NotificationLog[]> {
+  const limit = Math.min(filter?.limit || 100, 200);
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const conditions: string[] = [];
+      const values: any[] = [];
+      if (filter?.appointmentId) {
+        values.push(filter.appointmentId);
+        conditions.push(`appointment_id = $${values.length}`);
+      }
+      if (filter?.channel) {
+        values.push(filter.channel);
+        conditions.push(`channel = $${values.length}`);
+      }
+      const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      values.push(limit);
+      const res = await pgPool.query(`SELECT * FROM notification_logs ${where} ORDER BY sent_at DESC LIMIT $${values.length}`, values);
+      return res.rows.map(row => ({
+        id: row.id,
+        appointmentId: row.appointment_id || undefined,
+        channel: row.channel,
+        recipient: row.recipient || '',
+        notificationType: row.notification_type,
+        status: row.status,
+        subject: row.subject || undefined,
+        message: row.message || undefined,
+        idempotencyKey: row.idempotency_key || undefined,
+        error: row.error || undefined,
+        sentAt: row.sent_at ? new Date(row.sent_at).toISOString() : new Date().toISOString(),
+        metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {})
+      }));
+    } catch (err) {
+      console.error('Error getting notification logs from PostgreSQL:', err);
+    }
+  }
+
+  let logs = [...(memoryDb.notificationLogs || [])];
+  if (filter?.appointmentId) logs = logs.filter(l => l.appointmentId === filter.appointmentId);
+  if (filter?.channel) logs = logs.filter(l => l.channel === filter.channel);
+  return logs.slice(0, limit);
+}
+
+// ---------------------------------------------------------------------------
+// ATOMIC TRANSACTION: AVAILABILITY EXCEPTION & CANCELLATIONS
+// ---------------------------------------------------------------------------
+
+export async function applyAvailabilityExceptionWithCancellations(payload: {
+  alcance: ScheduleScope;
+  profesionalId?: string;
+  profesionalIds?: string[];
+  fecha: string;
+  tipo: AvailabilityExceptionType;
+  intervalos?: TimeInterval[];
+  motivo?: string;
+  conflictAppointmentIds?: string[];
+  cancelMotivo?: string;
+  canceladoPor?: string;
+}): Promise<{
+  exceptions: AvailabilityException[];
+  cancelledAppointments: Appointment[];
+}> {
+  const cancelMotivo = (payload.cancelMotivo || 'Cancelado por parte del salón, por excepción de horarios').trim();
+  const canceladoPor = (payload.canceladoPor || 'Sistema / Excepción de horarios').trim();
+  const now = new Date().toISOString();
+
+  const targetProfIds: (string | undefined)[] = payload.alcance === 'profesional'
+    ? (payload.profesionalIds && payload.profesionalIds.length > 0 ? payload.profesionalIds : [payload.profesionalId])
+    : [undefined];
+
+  const exceptionsToCreate: AvailabilityException[] = targetProfIds.map(pId => ({
+    id: `exc-${payload.alcance}-${pId || 'local'}-${payload.fecha}-${Math.floor(Math.random() * 10000)}`,
+    alcance: payload.alcance,
+    profesionalId: pId,
+    fecha: payload.fecha,
+    tipo: payload.tipo,
+    intervalos: payload.tipo === 'cerrado' ? [] : (payload.intervalos || []),
+    motivo: payload.motivo,
+    createdAt: now,
+    updatedAt: now
+  }));
+
+  const conflictIds = (payload.conflictAppointmentIds || []).filter(Boolean);
+  let updatedAppointments: Appointment[] = [];
+
+  // Database Transaction execution (PostgreSQL)
+  if (isPostgresConnected && pgPool) {
+    const client = await pgPool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Cancel conflicting appointments in atomic transaction
+      if (conflictIds.length > 0) {
+        await client.query(`
+          UPDATE appointments
+          SET estado = 'cancelado',
+              motivo_cancelacion = $1,
+              cancelado_en = $2,
+              cancelado_origen = 'excepcion_disponibilidad',
+              cancelado_por = $3,
+              updated_at = NOW()
+          WHERE id = ANY($4)
+        `, [cancelMotivo, now, canceladoPor, conflictIds]);
+
+        const updatedRes = await client.query(`
+          SELECT * FROM appointments WHERE id = ANY($1)
+        `, [conflictIds]);
+
+        updatedAppointments = updatedRes.rows.map(mapAppointmentRow);
+      }
+
+      // 2. Insert availability exceptions in same transaction
+      for (const exc of exceptionsToCreate) {
+        await client.query(`
+          INSERT INTO availability_exceptions (id, alcance, profesional_id, fecha, tipo, intervalos, motivo, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+        `, [
+          exc.id,
+          exc.alcance,
+          exc.profesionalId || null,
+          exc.fecha,
+          exc.tipo,
+          JSON.stringify(exc.intervalos),
+          exc.motivo || null
+        ]);
+      }
+
+      // Confirm / commit the transaction
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      console.error('Error executing availability exception transaction in PostgreSQL:', txErr);
+      throw txErr;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Synchronize memoryDb
+  if (conflictIds.length > 0) {
+    const memoryUpdated: Appointment[] = [];
+    for (const apt of memoryDb.appointments) {
+      if (conflictIds.includes(apt.id)) {
+        apt.estado = 'cancelado';
+        apt.motivoCancelacion = cancelMotivo;
+        apt.canceladoEn = now;
+        apt.canceladoOrigen = 'excepcion_disponibilidad';
+        apt.canceladoPor = canceladoPor;
+        apt.updatedAt = now;
+        memoryUpdated.push(apt);
+      }
+    }
+    if (updatedAppointments.length === 0) {
+      updatedAppointments = memoryUpdated;
+    }
+  }
+
+  if (!memoryDb.availabilityExceptions) memoryDb.availabilityExceptions = [];
+  for (const exc of exceptionsToCreate) {
+    memoryDb.availabilityExceptions.unshift(exc);
+  }
+  saveLocalFileDb();
+
+  return {
+    exceptions: exceptionsToCreate,
+    cancelledAppointments: updatedAppointments
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CRUD OPERATIONS: PROMOCIONES (PUBLIC CODES & PROMOTIONS)
+// ---------------------------------------------------------------------------
+
+function mapPromotionRow(row: any): Promotion {
+  return {
+    id: row.id,
+    codigo: row.codigo,
+    nombre: row.nombre,
+    descripcion: row.descripcion || undefined,
+    activo: Boolean(row.activo),
+    tipoDescuento: row.tipo_descuento as DiscountType,
+    valorDescuento: Number(row.valor_descuento),
+    fechaInicio: row.fecha_inicio,
+    fechaVencimiento: row.fecha_vencimiento || null,
+    limiteTotalUsos: row.limite_total_usos != null ? Number(row.limite_total_usos) : null,
+    limiteUsoPorCliente: row.limite_uso_por_cliente != null ? Number(row.limite_uso_por_cliente) : null,
+    periodoReutilizacionDias: row.periodo_reutilizacion_dias != null ? Number(row.periodo_reutilizacion_dias) : null,
+    serviciosAplicables: typeof row.servicios_aplicables === 'string' ? JSON.parse(row.servicios_aplicables) : (row.servicios_aplicables || ['todos']),
+    montoMinimo: row.monto_minimo != null ? Number(row.monto_minimo) : null,
+    usosActuales: Number(row.usos_actuales || 0),
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
+  };
+}
+
+function mapPromotionUsageRow(row: any): PromotionUsage {
+  return {
+    id: row.id,
+    promocionId: row.promocion_id,
+    codigo: row.codigo,
+    clienteId: row.cliente_id || undefined,
+    clienteTelefono: row.cliente_telefono || undefined,
+    clienteEmail: row.cliente_email || undefined,
+    turnoId: row.turno_id || undefined,
+    descuentoAplicado: Number(row.descuento_aplicado),
+    precioOriginal: Number(row.precio_original),
+    precioFinal: Number(row.precio_final),
+    fechaUso: row.fecha_uso ? new Date(row.fecha_uso).toISOString() : new Date().toISOString()
+  };
+}
+
+function mapClientBenefitRow(row: any): ClientBenefit {
+  return {
+    id: row.id,
+    clienteId: row.cliente_id,
+    clienteNombre: row.cliente_nombre || undefined,
+    clienteTelefono: row.cliente_telefono || undefined,
+    clienteEmail: row.cliente_email || undefined,
+    titulo: row.titulo,
+    descripcion: row.descripcion || undefined,
+    tipoDescuento: row.tipo_descuento as DiscountType,
+    valorDescuento: Number(row.valor_descuento),
+    origen: row.origen as BenefitOrigin,
+    origenDetalle: row.origen_detalle || undefined,
+    fechaEmision: row.fecha_emision,
+    fechaVencimiento: row.fecha_vencimiento || null,
+    estado: row.estado as BenefitStatus,
+    turnoOrigenId: row.turno_origen_id || null,
+    turnoOrigenCodigo: row.turno_origen_codigo || null,
+    turnoUsoId: row.turno_uso_id || null,
+    turnoUsoCodigo: row.turno_uso_codigo || null,
+    usadoEn: row.usado_en ? new Date(row.usado_en).toISOString() : null,
+    serviciosAplicables: typeof row.servicios_aplicables === 'string' ? JSON.parse(row.servicios_aplicables) : (row.servicios_aplicables || ['todos']),
+    montoMinimo: row.monto_minimo != null ? Number(row.monto_minimo) : null,
+    descuentoAplicado: row.descuento_aplicado != null ? Number(row.descuento_aplicado) : null,
+    otorgadoPor: row.otorgado_por || undefined,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
+  };
+}
+
+export async function getPromotions(includeInactive: boolean = true): Promise<Promotion[]> {
+  if (isPostgresConnected && pgPool) {
+    try {
+      const query = includeInactive
+        ? 'SELECT * FROM promotions ORDER BY created_at DESC'
+        : 'SELECT * FROM promotions WHERE activo = TRUE ORDER BY created_at DESC';
+      const res = await pgPool.query(query);
+      return res.rows.map(row => mapPromotionRow(row));
+    } catch (err) {
+      console.error('Error fetching promotions from PostgreSQL:', err);
+    }
+  }
+
+  let list = memoryDb.promotions || [];
+  if (!includeInactive) {
+    list = list.filter(p => p.activo);
+  }
+  return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getPromotionById(id: string): Promise<Promotion | null> {
+  const cleanId = (id || '').trim();
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query('SELECT * FROM promotions WHERE id = $1', [cleanId]);
+      if (res.rows.length > 0) return mapPromotionRow(res.rows[0]);
+    } catch (err) {
+      console.error('Error fetching promotion by id from PostgreSQL:', err);
+    }
+  }
+  return memoryDb.promotions?.find(p => p.id === cleanId) || null;
+}
+
+export async function getPromotionByCode(code: string): Promise<Promotion | null> {
+  const cleanCode = (code || '').trim().toUpperCase();
+  if (!cleanCode) return null;
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query('SELECT * FROM promotions WHERE UPPER(codigo) = $1', [cleanCode]);
+      if (res.rows.length > 0) return mapPromotionRow(res.rows[0]);
+    } catch (err) {
+      console.error('Error fetching promotion by code from PostgreSQL:', err);
+    }
+  }
+  return memoryDb.promotions?.find(p => p.codigo.toUpperCase() === cleanCode) || null;
+}
+
+export async function createPromotion(promoData: Omit<Promotion, 'id' | 'createdAt' | 'updatedAt' | 'usosActuales'>): Promise<Promotion> {
+  const id = `promo-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const now = new Date().toISOString();
+  const cleanCode = promoData.codigo.trim().toUpperCase();
+
+  const newPromo: Promotion = {
+    ...promoData,
+    id,
+    codigo: cleanCode,
+    usosActuales: 0,
+    serviciosAplicables: promoData.serviciosAplicables || ['todos'],
+    createdAt: now,
+    updatedAt: now
+  };
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      await pgPool.query(`
+        INSERT INTO promotions (
+          id, codigo, nombre, descripcion, activo, tipo_descuento, valor_descuento,
+          fecha_inicio, fecha_vencimiento, limite_total_usos, limite_uso_por_cliente,
+          periodo_reutilizacion_dias, servicios_aplicables, monto_minimo, usos_actuales,
+          created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+      `, [
+        newPromo.id,
+        newPromo.codigo,
+        newPromo.nombre,
+        newPromo.descripcion || null,
+        newPromo.activo,
+        newPromo.tipoDescuento,
+        newPromo.valorDescuento,
+        newPromo.fechaInicio,
+        newPromo.fechaVencimiento || null,
+        newPromo.limiteTotalUsos || null,
+        newPromo.limiteUsoPorCliente || null,
+        newPromo.periodoReutilizacionDias || null,
+        JSON.stringify(newPromo.serviciosAplicables),
+        newPromo.montoMinimo || null,
+        0
+      ]);
+      return newPromo;
+    } catch (err) {
+      console.error('Error creating promotion in PostgreSQL:', err);
+      throw err;
+    }
+  }
+
+  if (!memoryDb.promotions) memoryDb.promotions = [];
+  memoryDb.promotions.unshift(newPromo);
+  saveLocalFileDb();
+  return newPromo;
+}
+
+export async function updatePromotion(id: string, updates: Partial<Promotion>): Promise<Promotion | null> {
+  const cleanId = (id || '').trim();
+  const now = new Date().toISOString();
+
+  if (updates.codigo) {
+    updates.codigo = updates.codigo.trim().toUpperCase();
+  }
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const current = await getPromotionById(cleanId);
+      if (!current) return null;
+
+      const merged: Promotion = {
+        ...current,
+        ...updates,
+        updatedAt: now
+      };
+
+      await pgPool.query(`
+        UPDATE promotions
+        SET codigo = $1,
+            nombre = $2,
+            descripcion = $3,
+            activo = $4,
+            tipo_descuento = $5,
+            valor_descuento = $6,
+            fecha_inicio = $7,
+            fecha_vencimiento = $8,
+            limite_total_usos = $9,
+            limite_uso_por_cliente = $10,
+            periodo_reutilizacion_dias = $11,
+            servicios_aplicables = $12,
+            monto_minimo = $13,
+            updated_at = NOW()
+        WHERE id = $14
+      `, [
+        merged.codigo,
+        merged.nombre,
+        merged.descripcion || null,
+        merged.activo,
+        merged.tipoDescuento,
+        merged.valorDescuento,
+        merged.fechaInicio,
+        merged.fechaVencimiento || null,
+        merged.limiteTotalUsos || null,
+        merged.limiteUsoPorCliente || null,
+        merged.periodoReutilizacionDias || null,
+        JSON.stringify(merged.serviciosAplicables || ['todos']),
+        merged.montoMinimo || null,
+        cleanId
+      ]);
+
+      return merged;
+    } catch (err) {
+      console.error('Error updating promotion in PostgreSQL:', err);
+      throw err;
+    }
+  }
+
+  if (!memoryDb.promotions) memoryDb.promotions = [];
+  const idx = memoryDb.promotions.findIndex(p => p.id === cleanId);
+  if (idx === -1) return null;
+
+  const merged = { ...memoryDb.promotions[idx], ...updates, updatedAt: now };
+  memoryDb.promotions[idx] = merged;
+  saveLocalFileDb();
+  return merged;
+}
+
+export async function deletePromotion(id: string): Promise<boolean> {
+  // Soft delete: deactivate to preserve historical integrity
+  const updated = await updatePromotion(id, { activo: false });
+  return updated !== null;
+}
+
+export async function getPromotionUsages(promocionId?: string, clienteId?: string): Promise<PromotionUsage[]> {
+  if (isPostgresConnected && pgPool) {
+    try {
+      const conditions: string[] = [];
+      const values: any[] = [];
+      if (promocionId) {
+        values.push(promocionId);
+        conditions.push(`promocion_id = $${values.length}`);
+      }
+      if (clienteId) {
+        values.push(clienteId);
+        conditions.push(`cliente_id = $${values.length}`);
+      }
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const res = await pgPool.query(`SELECT * FROM promotion_usages ${whereClause} ORDER BY fecha_uso DESC`, values);
+      return res.rows.map(row => mapPromotionUsageRow(row));
+    } catch (err) {
+      console.error('Error fetching promotion usages from PostgreSQL:', err);
+    }
+  }
+
+  let list = memoryDb.promotionUsages || [];
+  if (promocionId) list = list.filter(u => u.promocionId === promocionId);
+  if (clienteId) list = list.filter(u => u.clienteId === clienteId);
+  return [...list].sort((a, b) => b.fechaUso.localeCompare(a.fechaUso));
+}
+
+// ---------------------------------------------------------------------------
+// VALIDATION: PUBLIC PROMOTION CODE
+// ---------------------------------------------------------------------------
+
+export async function validatePromotion(params: {
+  codigo: string;
+  servicioId: string;
+  precio: number;
+  clienteId?: string;
+  telefono?: string;
+  email?: string;
+  fecha?: string;
+}): Promise<ValidateDiscountResult> {
+  const cleanCode = (params.codigo || '').trim().toUpperCase();
+  if (!cleanCode) {
+    return { valido: false, error: 'Por favor ingresá un código promocional.' };
+  }
+
+  const promo = await getPromotionByCode(cleanCode);
+  if (!promo) {
+    return { valido: false, error: `El código "${cleanCode}" no es válido o no existe.` };
+  }
+
+  if (!promo.activo) {
+    return { valido: false, error: `La promoción "${promo.nombre}" se encuentra inactiva.` };
+  }
+
+  const todayStr = params.fecha || new Date().toISOString().split('T')[0];
+  if (promo.fechaInicio && todayStr < promo.fechaInicio) {
+    return { valido: false, error: `Esta promoción aún no está vigente (comienza el ${promo.fechaInicio}).` };
+  }
+  if (promo.fechaVencimiento && todayStr > promo.fechaVencimiento) {
+    return { valido: false, error: `Esta promoción ha vencido el ${promo.fechaVencimiento}.` };
+  }
+
+  // Check total usage limit
+  if (promo.limiteTotalUsos != null && promo.limiteTotalUsos > 0) {
+    let currentUsages = promo.usosActuales || 0;
+    if (isPostgresConnected && pgPool) {
+      const countRes = await pgPool.query('SELECT COUNT(*) FROM promotion_usages WHERE promocion_id = $1', [promo.id]);
+      currentUsages = parseInt(countRes.rows[0].count, 10);
+    }
+    if (currentUsages >= promo.limiteTotalUsos) {
+      return { valido: false, error: `Esta promoción ha alcanzado su límite total de usos disponibles (${promo.limiteTotalUsos}).` };
+    }
+  }
+
+  // Check service applicability
+  if (promo.serviciosAplicables && promo.serviciosAplicables.length > 0 && !promo.serviciosAplicables.includes('todos')) {
+    if (!promo.serviciosAplicables.includes(params.servicioId)) {
+      return { valido: false, error: `Esta promoción no es válida para el servicio seleccionado.` };
+    }
+  }
+
+  // Check minimum amount
+  const basePrice = Number(params.precio || 0);
+  if (promo.montoMinimo != null && promo.montoMinimo > 0) {
+    if (basePrice < promo.montoMinimo) {
+      return {
+        valido: false,
+        error: `Esta promoción requiere un monto mínimo de $${promo.montoMinimo.toLocaleString('es-AR')}. (Precio actual: $${basePrice.toLocaleString('es-AR')})`
+      };
+    }
+  }
+
+  // Check per-client limits and reuse period
+  const phoneNormObj = normalizePhone(params.telefono || '');
+  const cleanPhone = phoneNormObj.canonical || phoneNormObj.nationalDigits || '';
+  const cleanEmail = normalizeEmail(params.email || '');
+
+  if (params.clienteId || cleanPhone || cleanEmail) {
+    let clientUsages: PromotionUsage[] = [];
+    if (isPostgresConnected && pgPool) {
+      const res = await pgPool.query(`
+        SELECT * FROM promotion_usages
+        WHERE promocion_id = $1 AND (
+          ($2::varchar IS NOT NULL AND cliente_id = $2) OR
+          ($3::varchar != '' AND cliente_telefono = $3) OR
+          ($4::varchar != '' AND cliente_email = $4)
+        )
+        ORDER BY fecha_uso DESC
+      `, [promo.id, params.clienteId || null, cleanPhone, cleanEmail]);
+      clientUsages = res.rows.map(row => mapPromotionUsageRow(row));
+    } else {
+      clientUsages = (memoryDb.promotionUsages || []).filter(u =>
+        u.promocionId === promo.id && (
+          (params.clienteId && u.clienteId === params.clienteId) ||
+          (cleanPhone && u.clienteTelefono === cleanPhone) ||
+          (cleanEmail && u.clienteEmail === cleanEmail)
+        )
+      ).sort((a, b) => b.fechaUso.localeCompare(a.fechaUso));
+    }
+
+    // Reuse period in days check
+    if (promo.periodoReutilizacionDias != null && promo.periodoReutilizacionDias > 0 && clientUsages.length > 0) {
+      const lastUsage = clientUsages[0];
+      const lastDate = new Date(lastUsage.fechaUso).getTime();
+      const nowMs = Date.now();
+      const daysElapsed = (nowMs - lastDate) / (1000 * 60 * 60 * 24);
+      if (daysElapsed < promo.periodoReutilizacionDias) {
+        const reusableDate = new Date(lastDate + promo.periodoReutilizacionDias * 86400000);
+        return {
+          valido: false,
+          error: `Ya has utilizado esta promoción recientemente. Podrás volver a utilizarla a partir del ${reusableDate.toLocaleDateString('es-AR')}.`
+        };
+      }
+    }
+
+    // Per-client total limit check
+    if (promo.limiteUsoPorCliente != null && promo.limiteUsoPorCliente > 0) {
+      if (clientUsages.length >= promo.limiteUsoPorCliente) {
+        return {
+          valido: false,
+          error: `Ya has alcanzado el límite de usos permitidos (${promo.limiteUsoPorCliente}) para tu cuenta en esta promoción.`
+        };
+      }
+    }
+  }
+
+  // Calculate discount
+  let montoDescontado = 0;
+  if (promo.tipoDescuento === 'porcentaje') {
+    montoDescontado = Math.round(basePrice * (promo.valorDescuento / 100));
+  } else {
+    montoDescontado = promo.valorDescuento;
+  }
+  montoDescontado = Math.min(basePrice, Math.max(0, montoDescontado));
+  const precioFinal = Math.max(0, basePrice - montoDescontado);
+
+  return {
+    valido: true,
+    tipo: 'promocion',
+    descuentoId: promo.id,
+    codigo: promo.codigo,
+    titulo: promo.nombre,
+    descripcion: promo.descripcion,
+    tipoDescuento: promo.tipoDescuento,
+    valorDescuento: promo.valorDescuento,
+    montoDescontado,
+    precioOriginal: basePrice,
+    precioFinal
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CRUD OPERATIONS: CLIENT BENEFITS (INDIVIDUAL ADMINISTRATIVE BENEFITS)
+// ---------------------------------------------------------------------------
+
+export async function getClientBenefits(params?: {
+  clienteId?: string;
+  estado?: BenefitStatus;
+  search?: string;
+}): Promise<ClientBenefit[]> {
+  if (isPostgresConnected && pgPool) {
+    try {
+      const conditions: string[] = [];
+      const values: any[] = [];
+
+      if (params?.clienteId) {
+        values.push(params.clienteId);
+        conditions.push(`cliente_id = $${values.length}`);
+      }
+      if (params?.estado) {
+        values.push(params.estado);
+        conditions.push(`estado = $${values.length}`);
+      }
+      if (params?.search) {
+        values.push(`%${params.search.toLowerCase()}%`);
+        conditions.push(`(
+          LOWER(titulo) LIKE $${values.length} OR
+          LOWER(cliente_nombre) LIKE $${values.length} OR
+          LOWER(cliente_telefono) LIKE $${values.length}
+        )`);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const res = await pgPool.query(`SELECT * FROM client_benefits ${whereClause} ORDER BY created_at DESC`, values);
+      return res.rows.map(row => mapClientBenefitRow(row));
+    } catch (err) {
+      console.error('Error fetching client benefits from PostgreSQL:', err);
+    }
+  }
+
+  let list = memoryDb.clientBenefits || [];
+  if (params?.clienteId) list = list.filter(b => b.clienteId === params.clienteId);
+  if (params?.estado) list = list.filter(b => b.estado === params.estado);
+  if (params?.search) {
+    const q = params.search.toLowerCase();
+    list = list.filter(b =>
+      b.titulo.toLowerCase().includes(q) ||
+      (b.clienteNombre && b.clienteNombre.toLowerCase().includes(q)) ||
+      (b.clienteTelefono && b.clienteTelefono.toLowerCase().includes(q))
+    );
+  }
+  return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getAvailableClientBenefits(params: {
+  clienteId?: string;
+  telefono?: string;
+  email?: string;
+  servicioId?: string;
+  precio?: number;
+}): Promise<ClientBenefit[]> {
+  const cleanPhone = normalizePhone(params.telefono || '');
+  const cleanEmail = normalizeEmail(params.email || '');
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  let benefits: ClientBenefit[] = [];
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query(`
+        SELECT * FROM client_benefits
+        WHERE estado = 'disponible' AND (
+          ($1::varchar IS NOT NULL AND cliente_id = $1) OR
+          ($2::varchar != '' AND cliente_telefono = $2) OR
+          ($3::varchar != '' AND cliente_email = $3)
+        )
+        ORDER BY created_at DESC
+      `, [params.clienteId || null, cleanPhone, cleanEmail]);
+      benefits = res.rows.map(row => mapClientBenefitRow(row));
+    } catch (err) {
+      console.error('Error fetching available client benefits from PostgreSQL:', err);
+    }
+  } else {
+    benefits = (memoryDb.clientBenefits || []).filter(b =>
+      b.estado === 'disponible' && (
+        (params.clienteId && b.clienteId === params.clienteId) ||
+        (cleanPhone && b.clienteTelefono && normalizePhone(b.clienteTelefono) === cleanPhone) ||
+        (cleanEmail && b.clienteEmail && normalizeEmail(b.clienteEmail) === cleanEmail)
+      )
+    );
+  }
+
+  // Filter out expired, and filter by service & min amount if provided
+  const validBenefits: ClientBenefit[] = [];
+  for (const b of benefits) {
+    if (b.fechaVencimiento && todayStr > b.fechaVencimiento) {
+      // Auto mark expired
+      updateClientBenefit(b.id, { estado: 'vencido' }).catch(() => {});
+      continue;
+    }
+
+    if (params.servicioId && b.serviciosAplicables && b.serviciosAplicables.length > 0 && !b.serviciosAplicables.includes('todos')) {
+      if (!b.serviciosAplicables.includes(params.servicioId)) {
+        continue;
+      }
+    }
+
+    if (params.precio != null && b.montoMinimo != null && b.montoMinimo > 0) {
+      if (params.precio < b.montoMinimo) {
+        continue;
+      }
+    }
+
+    validBenefits.push(b);
+  }
+
+  return validBenefits;
+}
+
+export async function createClientBenefit(benefitData: Omit<ClientBenefit, 'id' | 'createdAt' | 'updatedAt' | 'estado'>): Promise<ClientBenefit> {
+  const id = `ben-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const now = new Date().toISOString();
+  const todayStr = now.split('T')[0];
+
+  // Fetch client details if not present
+  let clientName = benefitData.clienteNombre;
+  let clientPhone = benefitData.clienteTelefono;
+  let clientEmail = benefitData.clienteEmail;
+
+  if (benefitData.clienteId && (!clientName || !clientPhone)) {
+    const clients = await getClients({ activeOnly: false });
+    const client = clients.find(c => c.id === benefitData.clienteId);
+    if (client) {
+      clientName = `${client.nombre} ${client.apellido}`.trim();
+      const pNorm = normalizePhone(client.telefono);
+      clientPhone = pNorm.canonical || pNorm.nationalDigits || client.telefono;
+      clientEmail = normalizeEmail(client.email || '');
+    }
+  }
+
+  const phoneNorm = clientPhone ? normalizePhone(clientPhone) : null;
+  const cleanPhoneStr = phoneNorm ? (phoneNorm.canonical || phoneNorm.nationalDigits || clientPhone) : undefined;
+  const cleanEmailStr = clientEmail ? normalizeEmail(clientEmail) : undefined;
+
+  const newBenefit: ClientBenefit = {
+    ...benefitData,
+    id,
+    clienteNombre: clientName,
+    clienteTelefono: cleanPhoneStr,
+    clienteEmail: cleanEmailStr,
+    fechaEmision: benefitData.fechaEmision || todayStr,
+    estado: 'disponible',
+    serviciosAplicables: benefitData.serviciosAplicables || ['todos'],
+    createdAt: now,
+    updatedAt: now
+  };
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      await pgPool.query(`
+        INSERT INTO client_benefits (
+          id, cliente_id, cliente_nombre, cliente_telefono, cliente_email,
+          titulo, descripcion, tipo_descuento, valor_descuento,
+          origen, origen_detalle, fecha_emision, fecha_vencimiento,
+          estado, turno_origen_id, turno_origen_codigo,
+          servicios_aplicables, monto_minimo, otorgado_por,
+          created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, $8, $9,
+          $10, $11, $12, $13,
+          $14, $15, $16,
+          $17, $18, $19,
+          NOW(), NOW()
+        )
+      `, [
+        newBenefit.id,
+        newBenefit.clienteId,
+        newBenefit.clienteNombre || null,
+        newBenefit.clienteTelefono || null,
+        newBenefit.clienteEmail || null,
+        newBenefit.titulo,
+        newBenefit.descripcion || null,
+        newBenefit.tipoDescuento,
+        newBenefit.valorDescuento,
+        newBenefit.origen,
+        newBenefit.origenDetalle || null,
+        newBenefit.fechaEmision,
+        newBenefit.fechaVencimiento || null,
+        newBenefit.estado,
+        newBenefit.turnoOrigenId || null,
+        newBenefit.turnoOrigenCodigo || null,
+        JSON.stringify(newBenefit.serviciosAplicables),
+        newBenefit.montoMinimo || null,
+        newBenefit.otorgadoPor || null
+      ]);
+      return newBenefit;
+    } catch (err) {
+      console.error('Error creating client benefit in PostgreSQL:', err);
+      throw err;
+    }
+  }
+
+  if (!memoryDb.clientBenefits) memoryDb.clientBenefits = [];
+  memoryDb.clientBenefits.unshift(newBenefit);
+  saveLocalFileDb();
+  return newBenefit;
+}
+
+export async function updateClientBenefit(id: string, updates: Partial<ClientBenefit>): Promise<ClientBenefit | null> {
+  const cleanId = (id || '').trim();
+  const now = new Date().toISOString();
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const currentRes = await pgPool.query('SELECT * FROM client_benefits WHERE id = $1', [cleanId]);
+      if (currentRes.rows.length === 0) return null;
+      const current = mapClientBenefitRow(currentRes.rows[0]);
+
+      const merged: ClientBenefit = {
+        ...current,
+        ...updates,
+        updatedAt: now
+      };
+
+      await pgPool.query(`
+        UPDATE client_benefits
+        SET titulo = $1,
+            descripcion = $2,
+            tipo_descuento = $3,
+            valor_descuento = $4,
+            fecha_vencimiento = $5,
+            estado = $6,
+            turno_uso_id = $7,
+            turno_uso_codigo = $8,
+            usado_en = $9,
+            descuento_aplicado = $10,
+            servicios_aplicables = $11,
+            monto_minimo = $12,
+            updated_at = NOW()
+        WHERE id = $13
+      `, [
+        merged.titulo,
+        merged.descripcion || null,
+        merged.tipoDescuento,
+        merged.valorDescuento,
+        merged.fechaVencimiento || null,
+        merged.estado,
+        merged.turnoUsoId || null,
+        merged.turnoUsoCodigo || null,
+        merged.usadoEn ? new Date(merged.usadoEn) : null,
+        merged.descuentoAplicado || null,
+        JSON.stringify(merged.serviciosAplicables || ['todos']),
+        merged.montoMinimo || null,
+        cleanId
+      ]);
+
+      return merged;
+    } catch (err) {
+      console.error('Error updating client benefit in PostgreSQL:', err);
+      throw err;
+    }
+  }
+
+  if (!memoryDb.clientBenefits) memoryDb.clientBenefits = [];
+  const idx = memoryDb.clientBenefits.findIndex(b => b.id === cleanId);
+  if (idx === -1) return null;
+
+  const merged = { ...memoryDb.clientBenefits[idx], ...updates, updatedAt: now };
+  memoryDb.clientBenefits[idx] = merged;
+  saveLocalFileDb();
+  return merged;
+}
+
+export async function validateClientBenefit(params: {
+  beneficioId: string;
+  servicioId: string;
+  precio: number;
+  clienteId?: string;
+  telefono?: string;
+  email?: string;
+}): Promise<ValidateDiscountResult> {
+  const cleanId = (params.beneficioId || '').trim();
+  if (!cleanId) {
+    return { valido: false, error: 'Beneficio no especificado.' };
+  }
+
+  let benefit: ClientBenefit | null = null;
+  if (isPostgresConnected && pgPool) {
+    const res = await pgPool.query('SELECT * FROM client_benefits WHERE id = $1', [cleanId]);
+    if (res.rows.length > 0) benefit = mapClientBenefitRow(res.rows[0]);
+  } else {
+    benefit = memoryDb.clientBenefits?.find(b => b.id === cleanId) || null;
+  }
+
+  if (!benefit) {
+    return { valido: false, error: 'El beneficio seleccionado no existe.' };
+  }
+
+  if (benefit.estado !== 'disponible') {
+    return { valido: false, error: `Este beneficio ya no se encuentra disponible (estado: ${benefit.estado}).` };
+  }
+
+  const todayStr = new Date().toISOString().split('T')[0];
+  if (benefit.fechaVencimiento && todayStr > benefit.fechaVencimiento) {
+    updateClientBenefit(benefit.id, { estado: 'vencido' }).catch(() => {});
+    return { valido: false, error: `Este beneficio ha vencido el ${benefit.fechaVencimiento}.` };
+  }
+
+  // Check client matching
+  const cleanPhone = normalizePhone(params.telefono || '');
+  const benefitPhone = normalizePhone(benefit.clienteTelefono || '');
+  if (params.clienteId && benefit.clienteId && params.clienteId !== benefit.clienteId && cleanPhone && benefitPhone && cleanPhone !== benefitPhone) {
+    return { valido: false, error: 'Este beneficio pertenece a otra clienta.' };
+  }
+
+  // Check service applicability
+  if (benefit.serviciosAplicables && benefit.serviciosAplicables.length > 0 && !benefit.serviciosAplicables.includes('todos')) {
+    if (!benefit.serviciosAplicables.includes(params.servicioId)) {
+      return { valido: false, error: 'Este beneficio no aplica para el servicio seleccionado.' };
+    }
+  }
+
+  // Check minimum amount
+  const basePrice = Number(params.precio || 0);
+  if (benefit.montoMinimo != null && benefit.montoMinimo > 0) {
+    if (basePrice < benefit.montoMinimo) {
+      return {
+        valido: false,
+        error: `Este beneficio requiere un monto mínimo de $${benefit.montoMinimo.toLocaleString('es-AR')}.`
+      };
+    }
+  }
+
+  // Calculate discount
+  let montoDescontado = 0;
+  if (benefit.tipoDescuento === 'porcentaje') {
+    montoDescontado = Math.round(basePrice * (benefit.valorDescuento / 100));
+  } else {
+    montoDescontado = benefit.valorDescuento;
+  }
+  montoDescontado = Math.min(basePrice, Math.max(0, montoDescontado));
+  const precioFinal = Math.max(0, basePrice - montoDescontado);
+
+  return {
+    valido: true,
+    tipo: 'beneficio',
+    descuentoId: benefit.id,
+    titulo: benefit.titulo,
+    descripcion: benefit.descripcion,
+    tipoDescuento: benefit.tipoDescuento,
+    valorDescuento: benefit.valorDescuento,
+    montoDescontado,
+    precioOriginal: basePrice,
+    precioFinal
+  };
+}
+
+// ---------------------------------------------------------------------------
+// COMPENSATION / EXCEPTION BENEFIT ISSUANCE
+// ---------------------------------------------------------------------------
+
+export async function grantCompensationBenefitForCancelledAppointment(params: {
+  appointmentId: string;
+  tipoDescuento: DiscountType;
+  valorDescuento: number;
+  diasValidez?: number | null;
+  fechaVencimiento?: string | null;
+  titulo?: string;
+  descripcion?: string;
+  serviciosAplicables?: string[];
+  montoMinimo?: number | null;
+  otorgadoPor?: string;
+}): Promise<ClientBenefit> {
+  const cleanAptId = (params.appointmentId || '').trim();
+  const apt = await getAppointmentById(cleanAptId);
+  if (!apt) {
+    throw new Error('El turno indicado para compensación no existe.');
+  }
+
+  // Idempotency check: verify if a benefit for this cancelled appointment already exists
+  if (isPostgresConnected && pgPool) {
+    try {
+      const existingRes = await pgPool.query(
+        'SELECT * FROM client_benefits WHERE turno_origen_id = $1 LIMIT 1',
+        [apt.id]
+      );
+      if (existingRes.rows.length > 0) {
+        return mapClientBenefitRow(existingRes.rows[0]);
+      }
+    } catch (err) {
+      console.error('Error checking existing compensation benefit in PostgreSQL:', err);
+    }
+  } else {
+    const existing = (memoryDb.clientBenefits || []).find(b => b.turnoOrigenId === apt.id);
+    if (existing) {
+      return existing;
+    }
+  }
+
+  let expDate = params.fechaVencimiento || null;
+  if (!expDate && params.diasValidez && params.diasValidez > 0) {
+    const d = new Date();
+    d.setDate(d.getDate() + params.diasValidez);
+    expDate = d.toISOString().split('T')[0];
+  }
+
+  const titulo = params.titulo || `Compensación por cancelación de turno (${apt.codigo})`;
+  const descripcion = params.descripcion || `Beneficio de compensación otorgado por cancelación del turno ${apt.servicioNombre} del ${apt.fecha}`;
+
+  try {
+    return await createClientBenefit({
+      clienteId: apt.clienteId || `cli-${apt.telefono}`,
+      clienteNombre: `${apt.nombre} ${apt.apellido}`.trim(),
+      clienteTelefono: apt.telefono,
+      clienteEmail: apt.email || undefined,
+      titulo,
+      descripcion,
+      tipoDescuento: params.tipoDescuento,
+      valorDescuento: params.valorDescuento,
+      origen: 'cancelacion_excepcion',
+      origenDetalle: `Turno ${apt.codigo} cancelado por excepción de agenda`,
+      fechaEmision: new Date().toISOString().split('T')[0],
+      fechaVencimiento: expDate,
+      turnoOrigenId: apt.id,
+      turnoOrigenCodigo: apt.codigo,
+      serviciosAplicables: params.serviciosAplicables || ['todos'],
+      montoMinimo: params.montoMinimo || null,
+      otorgadoPor: params.otorgadoPor || 'Administración'
+    });
+  } catch (err: any) {
+    // If a concurrent request inserted a benefit with the same turno_origen_id (caught by UNIQUE index)
+    if (isPostgresConnected && pgPool && (err?.code === '23505' || err?.message?.includes('unique') || err?.message?.includes('duplicate'))) {
+      const existingRes = await pgPool.query(
+        'SELECT * FROM client_benefits WHERE turno_origen_id = $1 LIMIT 1',
+        [apt.id]
+      );
+      if (existingRes.rows.length > 0) {
+        return mapClientBenefitRow(existingRes.rows[0]);
+      }
+    }
+    throw err;
+  }
 }
 

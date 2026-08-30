@@ -239,6 +239,115 @@ export interface Appointment {
   notasAdmin?: string;
   browserId?: string;
   alertasCliente?: ClientAlert[]; // Alertas activas de la clienta asociadas al turno
+
+  // Descuentos y beneficios aplicados
+  descuentoTipo?: 'promocion' | 'beneficio' | null;
+  descuentoId?: string; // ID de Promotion o ClientBenefit
+  descuentoCodigo?: string; // Código de promoción si aplica
+  descuentoNombre?: string; // Nombre descriptivo de la promo o beneficio
+  descuentoPorcentaje?: number;
+  descuentoMonto?: number; // Monto descontado ($)
+  precioOriginal?: number; // Precio antes del descuento
+  precioFinal?: number; // Precio a cobrar tras aplicar descuento
+
+  // Auditoría centralizada de cancelación
+  motivoCancelacion?: string;
+  canceladoEn?: string; // ISO date-time
+  canceladoOrigen?: 'agenda' | 'detalle_turno' | 'excepcion_disponibilidad' | 'admin' | 'cliente' | string;
+  canceladoPor?: string; // Usuario / Admin responsable
+}
+
+// ---------------------------------------------------------------------------
+// PROMOCIONES Y BENEFICIOS
+// ---------------------------------------------------------------------------
+
+export type DiscountType = 'porcentaje' | 'monto_fijo';
+export type BenefitStatus = 'disponible' | 'usado' | 'vencido' | 'cancelado';
+export type ClientBenefitStatus = BenefitStatus;
+export type BenefitOrigin = 'admin' | 'compensacion' | 'cancelacion_excepcion' | 'fidelidad' | 'fidelizacion' | 'cumpleanos' | 'promocion_especial' | 'otro';
+
+export interface Promotion {
+  id: string; // UUID
+  codigo: string; // e.g. "VERANO20", uppercase
+  nombre: string; // e.g. "Promo Verano 20% OFF"
+  descripcion?: string;
+  activo: boolean;
+  tipoDescuento: DiscountType; // 'porcentaje' | 'monto_fijo'
+  valorDescuento: number; // e.g. 20 (para 20%) o 2500 (para $2500)
+  fechaInicio: string; // YYYY-MM-DD
+  fechaVencimiento?: string | null; // YYYY-MM-DD o null si no vence
+  limiteTotalUsos?: number | null; // null = ilimitado
+  limiteUsoPorCliente?: number | null; // null = ilimitado (ej: 1 vez por cliente)
+  periodoReutilizacionDias?: number | null; // null = sin restricción, ej: 30 días para reutilizar
+  serviciosAplicables: string[]; // ['todos'] o array de servicioIds ['serv-1', 'serv-2']
+  montoMinimo?: number | null; // null = sin monto mínimo
+  usosActuales: number; // Contador acumulado de usos
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PromotionUsage {
+  id: string; // UUID
+  promocionId: string;
+  codigo?: string;
+  codigoPromocion?: string;
+  clienteId?: string;
+  clienteNombre?: string;
+  clienteTelefono?: string;
+  clienteEmail?: string;
+  turnoId?: string;
+  turnoCodigo?: string;
+  descuentoAplicado: number;
+  montoDescuento?: number;
+  precioOriginal: number;
+  precioFinal: number;
+  fechaUso: string; // ISO date-time
+}
+
+export interface ClientBenefit {
+  id: string; // UUID
+  clienteId: string; // FK -> Client.id
+  clienteNombre?: string;
+  clienteTelefono?: string;
+  clienteEmail?: string;
+  titulo: string; // e.g. "15% de Compensación por Demora"
+  descripcion?: string;
+  tipoDescuento: DiscountType;
+  valorDescuento: number;
+  origen: BenefitOrigin;
+  origenDetalle?: string;
+  fechaEmision: string; // YYYY-MM-DD
+  fechaVencimiento?: string | null; // YYYY-MM-DD
+  estado: BenefitStatus; // 'disponible' | 'usado' | 'vencido' | 'cancelado'
+  turnoOrigenId?: string | null; // Turno que originó el beneficio
+  turnoOrigenCodigo?: string | null;
+  turnoUsoId?: string | null; // Turno en que se consumió el beneficio
+  turnoUsoCodigo?: string | null;
+  usadoEn?: string | null; // ISO date-time
+  fechaUso?: string | null; // alias
+  serviciosAplicables: string[]; // default ['todos']
+  montoMinimo?: number | null;
+  descuentoAplicado?: number | null;
+  otorgadoPor?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ValidateDiscountResult {
+  valido: boolean;
+  tipo?: 'promocion' | 'beneficio';
+  descuentoId?: string;
+  codigo?: string;
+  titulo?: string;
+  nombre?: string;
+  descripcion?: string;
+  tipoDescuento?: DiscountType;
+  valorDescuento?: number;
+  montoDescontado?: number;
+  montoDescuento?: number;
+  precioOriginal?: number;
+  precioFinal?: number;
+  error?: string;
 }
 
 export interface AvailableProfessionalSummary {
@@ -279,17 +388,6 @@ export interface DayScheduleConfig {
   cierre: string; // "19:00"
 }
 
-export interface BlockedTimeRange {
-  id: string;
-  fecha: string; // YYYY-MM-DD
-  tipo: 'dia_completo' | 'rango_horario';
-  horaInicio?: string; // HH:mm (e.g. "14:00")
-  horaFin?: string; // HH:mm (e.g. "17:30")
-  motivo?: string; // e.g. "Capacitación / Evento", "Almuerzo", "Asuntos personales"
-  profesionalId?: string; // Opcional: bloqueo exclusivo de un profesional
-  createdAt?: string;
-}
-
 export interface StudioConfig {
   nombreEstudio: string;
   subtitulo: string;
@@ -309,9 +407,6 @@ export interface StudioConfig {
   };
   intervaloMinutos: number; // e.g. 30
   bufferMinutos: number; // e.g. 0 or 15
-  diasBloqueados: string[]; // ['2026-12-25', '2026-01-01']
-  horariosBloqueados: Record<string, string[]>; // { '2026-08-25': ['09:00', '09:30'] }
-  bloqueosDetallados?: BlockedTimeRange[];
   pinAdmin: string;
   diasInactividadCliente?: number; // Días sin visitas para considerar cliente inactivo (default: 60)
   minTurnosRecurrente?: number; // Cantidad mínima de turnos para considerar cliente recurrente (default: 2)
@@ -331,3 +426,4 @@ export interface DashboardStats {
   }>;
   proximosTurnos: Appointment[];
 }
+

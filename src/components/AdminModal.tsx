@@ -27,7 +27,9 @@ import {
   Users,
   Mail,
   RotateCcw,
-  CalendarCheck
+  CalendarCheck,
+  Loader2,
+  Tag
 } from 'lucide-react';
 import type { 
   Appointment, 
@@ -45,6 +47,7 @@ import { AppointmentDetailModal } from './AppointmentDetailModal.js';
 import { ScheduleManagementAdmin } from './ScheduleManagementAdmin.js';
 import { AvailabilityExceptionsAdmin } from './AvailabilityExceptionsAdmin.js';
 import { ProfessionalManagementAdmin } from './ProfessionalManagementAdmin.js';
+import { PromotionsManagementAdmin } from './PromotionsManagementAdmin.js';
 
 interface AdminModalProps {
   isOpen: boolean;
@@ -102,7 +105,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [pinInput, setPinInput] = useState<string>('');
   const [pinError, setPinError] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<'agenda' | 'clientes' | 'profesionales' | 'horarios' | 'excepciones' | 'nuevo' | 'servicios' | 'stats'>('agenda');
+  const [activeTab, setActiveTab] = useState<'agenda' | 'clientes' | 'profesionales' | 'horarios' | 'excepciones' | 'nuevo' | 'servicios' | 'promociones' | 'stats'>('agenda');
   const [clientLookupForFicha, setClientLookupForFicha] = useState<{ id?: string; telefono?: string; nombre?: string; apellido?: string } | null>(null);
   const [selectedAppointmentForDetail, setSelectedAppointmentForDetail] = useState<Appointment | null>(null);
   const [selectedProfForSchedule, setSelectedProfForSchedule] = useState<string | null>(null);
@@ -167,6 +170,9 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [manualError, setManualError] = useState<string | null>(null);
 
   // In-UI Action confirmation states (replaces iframe-blocked window.confirm)
+  const [appointmentToCancel, setAppointmentToCancel] = useState<Appointment | null>(null);
+  const [cancelModalReason, setCancelModalReason] = useState<string>('Cancelación solicitada por la clienta');
+  const [isCancellingApt, setIsCancellingApt] = useState<boolean>(false);
   const [appointmentToDelete, setAppointmentToDelete] = useState<Appointment | null>(null);
   const [appointmentToRevert, setAppointmentToRevert] = useState<{
     apt: Appointment;
@@ -342,14 +348,32 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   }, [isOpen, isAuthenticated]);
 
   // Change Appointment Status
-  const handleUpdateStatus = async (id: string, newStatus: AppointmentStatus) => {
+  const handleUpdateStatus = async (
+    id: string,
+    newStatus: AppointmentStatus,
+    cancelMeta?: { motivo?: string; origen?: string; canceladoPor?: string }
+  ) => {
     try {
       const cleanId = (id || '').trim();
-      const res = await fetch(`/api/turnos/${encodeURIComponent(cleanId)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ estado: newStatus })
-      });
+      let res: Response;
+      if (newStatus === 'cancelado') {
+        res = await fetch(`/api/turnos/${encodeURIComponent(cleanId)}/cancel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            motivo: cancelMeta?.motivo || 'Cancelado por administración',
+            origen: cancelMeta?.origen || 'agenda',
+            canceladoPor: cancelMeta?.canceladoPor || 'Administración'
+          })
+        });
+      } else {
+        res = await fetch(`/api/turnos/${encodeURIComponent(cleanId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ estado: newStatus })
+        });
+      }
+
       if (res.ok) {
         const updated = await res.json();
         setAppointments(prev => prev.map(a => (a.id === cleanId || a.codigo === cleanId) ? updated : a));
@@ -910,6 +934,18 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               </button>
 
               <button
+                onClick={() => setActiveTab('promociones')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 cursor-pointer ${
+                  activeTab === 'promociones'
+                    ? 'bg-[#8E4455] text-white shadow-xs'
+                    : 'text-[#5A4B43] hover:bg-[#FAF7F2]'
+                }`}
+              >
+                <Tag className="w-3.5 h-3.5" />
+                <span>Promociones</span>
+              </button>
+
+              <button
                 onClick={() => setActiveTab('nuevo')}
                 className={`px-3.5 py-2 rounded-xl text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 cursor-pointer ${
                   activeTab === 'nuevo'
@@ -1113,9 +1149,23 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                 </div>
 
                                 <div className="text-right">
-                                  <span className="font-serif font-bold text-[#8E4455] text-lg">
-                                    ${apt.precio.toLocaleString('es-AR')}
-                                  </span>
+                                  {apt.descuentoMonto && apt.descuentoMonto > 0 ? (
+                                    <div>
+                                      <span className="text-[10px] text-[#8C7A70] line-through block">
+                                        ${(apt.precioOriginal || (apt.precio + apt.descuentoMonto)).toLocaleString('es-AR')}
+                                      </span>
+                                      <span className="font-serif font-bold text-[#8E4455] text-lg">
+                                        ${apt.precio.toLocaleString('es-AR')}
+                                      </span>
+                                      <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded-md border border-emerald-200 block">
+                                        {apt.descuentoCodigo ? `Cupón: ${apt.descuentoCodigo}` : 'Beneficio'}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <span className="font-serif font-bold text-[#8E4455] text-lg">
+                                      ${apt.precio.toLocaleString('es-AR')}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
 
@@ -1266,7 +1316,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                         Completar
                                       </button>
                                       <button
-                                        onClick={() => handleUpdateStatus(apt.id, 'cancelado')}
+                                        onClick={() => {
+                                          setCancelModalReason('Cancelación solicitada por la clienta');
+                                          setAppointmentToCancel(apt);
+                                        }}
                                         className="px-2.5 py-1 rounded-lg bg-rose-100 text-rose-800 font-medium hover:bg-rose-200 text-[11px] transition-colors cursor-pointer"
                                         title="Cancelar este turno"
                                       >
@@ -1300,6 +1353,22 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                   </button>
                                 )}
                               </div>
+
+                              {/* Información visible de cancelación si el turno fue cancelado */}
+                              {apt.estado === 'cancelado' && (
+                                <div className="p-2 rounded-lg bg-rose-50/90 border border-rose-200 text-[11px] text-rose-900 space-y-0.5">
+                                  <div className="font-semibold flex items-center gap-1 text-rose-800">
+                                    <XCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                                    <span>Motivo: {apt.motivoCancelacion || 'Cancelado por administración'}</span>
+                                  </div>
+                                  {apt.canceladoEn && (
+                                    <div className="text-[10px] text-rose-700/80">
+                                      {new Date(apt.canceladoEn).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' })}
+                                      {apt.canceladoPor && ` · ${apt.canceladoPor}`}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
 
                               {/* Revert status action for completed or cancelled appointments */}
                               {apt.estado === 'completado' && (
@@ -2281,6 +2350,15 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 </div>
               )}
 
+              {/* TAB: PROMOCIONES Y BENEFICIOS */}
+              {activeTab === 'promociones' && (
+                <PromotionsManagementAdmin
+                  services={services}
+                  clients={[]}
+                  onRefreshData={loadAdminData}
+                />
+              )}
+
               {/* TAB 5: MÉTRICAS */}
               {activeTab === 'stats' && stats && (
                 <div className="space-y-6">
@@ -2344,6 +2422,109 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           onSaveNotes={handleSaveNotesDirect}
           onOpenClientFicha={handleOpenClientFichaFromDetail}
         />
+
+        {/* Modal de Cancelación de Turno (con motivo) */}
+        {appointmentToCancel && (
+          <div className="fixed inset-0 z-[120] bg-black/60 backdrop-blur-2xs flex items-center justify-center p-4 animate-fade-in">
+            <div className="bg-white rounded-3xl p-6 max-w-md w-full border border-[#E8DCD5] shadow-2xl space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 flex items-center justify-center shrink-0">
+                  <XCircle className="w-6 h-6 text-rose-600" />
+                </div>
+                <div>
+                  <h4 className="font-serif text-lg font-bold text-[#241E1A]">
+                    ¿Cancelar este turno?
+                  </h4>
+                  <p className="text-xs text-[#7A6B62]">
+                    Código: <span className="font-mono font-bold text-[#241E1A]">{appointmentToCancel.codigo}</span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-[#FAF7F2] p-4 rounded-2xl border border-[#E8DCD5] text-xs text-[#5A4B43] space-y-1.5">
+                <p>
+                  Clienta: <strong className="text-[#241E1A]">{appointmentToCancel.nombre} {appointmentToCancel.apellido}</strong>
+                </p>
+                <p>
+                  Servicio: <strong>{appointmentToCancel.servicioNombre}</strong>
+                </p>
+                <p>
+                  Fecha y Hora: <strong>{appointmentToCancel.fecha} a las {appointmentToCancel.horaInicio} hs</strong>
+                </p>
+                <p className="text-[#8E4455] font-medium pt-1">
+                  ℹ️ El turno pasará a estado <strong>CANCELADO</strong>, se liberará el horario en la agenda y se enviará la notificación por email a la clienta.
+                </p>
+              </div>
+
+              <div className="space-y-2 pt-1 border-t border-[#F0E6DE]">
+                <label className="block text-xs font-semibold text-[#241E1A]">
+                  Motivo de cancelación:
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    'Cancelación solicitada por la clienta',
+                    'Imprevisto en el salón',
+                    'Reorganización de agenda',
+                    'Cancelado por parte del salón, por excepción de horarios'
+                  ].map(preset => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setCancelModalReason(preset)}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer border text-left ${
+                        cancelModalReason === preset
+                          ? 'bg-[#8E4455] text-white border-[#8E4455]'
+                          : 'bg-[#FAF7F2] text-[#5A4B43] border-[#E8DCD5] hover:bg-[#E8DCD5]'
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  rows={2}
+                  value={cancelModalReason}
+                  onChange={(e) => setCancelModalReason(e.target.value)}
+                  placeholder="Escribí el motivo de cancelación..."
+                  className="w-full p-2.5 rounded-xl bg-[#FAF7F2] border border-[#D9C9BF] text-xs text-[#241E1A] focus:outline-none focus:border-[#8E4455] resize-none mt-1"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  disabled={isCancellingApt}
+                  onClick={() => setAppointmentToCancel(null)}
+                  className="px-4 py-2.5 rounded-xl text-xs font-medium text-[#7A6B62] hover:text-[#241E1A] hover:bg-[#FAF7F2] transition-colors cursor-pointer"
+                >
+                  Volver
+                </button>
+                <button
+                  type="button"
+                  disabled={isCancellingApt}
+                  onClick={async () => {
+                    if (!appointmentToCancel) return;
+                    setIsCancellingApt(true);
+                    try {
+                      await handleUpdateStatus(appointmentToCancel.id, 'cancelado', {
+                        motivo: cancelModalReason.trim() || 'Cancelado por administración',
+                        origen: 'agenda',
+                        canceladoPor: 'Administración'
+                      });
+                      setAppointmentToCancel(null);
+                    } finally {
+                      setIsCancellingApt(false);
+                    }
+                  }}
+                  className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 shadow-sm transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {isCancellingApt ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
+                  <span>Sí, cancelar turno</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Modal de Confirmación de Eliminación de Turno */}
         {appointmentToDelete && (

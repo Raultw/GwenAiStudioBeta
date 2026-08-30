@@ -22,6 +22,7 @@ import {
   getAppointments,
   createAppointment,
   updateAppointment,
+  cancelAppointment,
   deleteAppointment,
   getStudioConfig,
   updateStudioConfig,
@@ -67,13 +68,31 @@ import {
   getAvailabilityExceptions,
   createAvailabilityException,
   deleteAvailabilityException,
-  extendStudioScheduleForDate
+  extendStudioScheduleForDate,
+  applyAvailabilityExceptionWithCancellations,
+  getNotificationLogs,
+  getPromotions,
+  getPromotionById,
+  getPromotionByCode,
+  createPromotion,
+  updatePromotion,
+  deletePromotion,
+  getPromotionUsages,
+  validatePromotion,
+  getClientBenefits,
+  getAvailableClientBenefits,
+  createClientBenefit,
+  updateClientBenefit,
+  validateClientBenefit,
+  grantCompensationBenefitForCancelledAppointment
 } from "./src/server/db.js";
+import { notificationService } from "./src/server/notifications/notificationService.js";
 import {
   calculateAvailability,
   validateBookingSlot,
   checkStudioCoverageForProfessionalException,
   checkStudioCoverageForProfessionalWeeklySchedule,
+  checkConflictingAppointmentsForException,
   timeToMinutes,
   minutesToTime
 } from "./src/server/availabilityEngine.js";
@@ -222,7 +241,10 @@ app.post("/api/turnos", async (req, res) => {
       profesional_id,
       profesionalId,
       observaciones, 
-      browserId 
+      browserId,
+      descuentoTipo,
+      descuentoId,
+      descuentoCodigo
     } = req.body;
 
     const sId = String(servicio_id || servicioId || "");
@@ -281,6 +303,11 @@ app.post("/api/turnos", async (req, res) => {
       servicioNombre: service.nombre,
       duracionMinutos: validation.duracionMinutos,
       precio: validation.precio,
+      precioOriginal: validation.precio,
+      precioFinal: validation.precio,
+      descuentoTipo: descuentoTipo || undefined,
+      descuentoId: descuentoId || undefined,
+      descuentoCodigo: descuentoCodigo || undefined,
       fecha: targetFecha,
       horaInicio: targetHoraInicio,
       horaFin: validation.horaFin,
@@ -294,6 +321,11 @@ app.post("/api/turnos", async (req, res) => {
     const saved = await createAppointment(newAppointment);
 
     const studioWhatsapp = studioConfig.whatsapp.replace(/[^0-9]/g, "");
+    const finalAmount = saved.precioFinal != null ? saved.precioFinal : saved.precio;
+    const discountLine = saved.descuentoMonto && saved.descuentoMonto > 0
+      ? `🎟️ *Descuento aplicado:* -$${saved.descuentoMonto.toLocaleString("es-AR")} (${saved.descuentoNombre || saved.descuentoCodigo || "Beneficio"})\n`
+      : "";
+
     const waMessage = encodeURIComponent(
       `✨ *¡Hola Gwen Nails!* Acabo de reservar mi turno:\n\n` +
       `📌 *Código:* ${bookingCode}\n` +
@@ -302,7 +334,8 @@ app.post("/api/turnos", async (req, res) => {
       (saved.profesionalNombre ? `👩‍🎨 *Profesional:* ${saved.profesionalNombre}\n` : "") +
       `📅 *Fecha:* ${saved.fecha}\n` +
       `⏰ *Horario:* ${saved.horaInicio} hs (${saved.duracionMinutos} min)\n` +
-      `💰 *Valor:* $${saved.precio.toLocaleString("es-AR")}\n` +
+      discountLine +
+      `💰 *Total a abonar:* $${finalAmount.toLocaleString("es-AR")}\n` +
       (saved.observaciones ? `📝 *Detalles:* ${saved.observaciones}\n` : "") +
       `\n¡Muchas gracias!`
     );
@@ -339,9 +372,45 @@ app.get("/api/turnos", async (req, res) => {
   }
 });
 
-// 8. PATCH /api/turnos/:id (Admin status / notes update)
+// 8. POST /api/turnos/:id/cancel (Centralized cancellation endpoint)
+app.post("/api/turnos/:id/cancel", async (req, res) => {
+  try {
+    const { motivo, origen, canceladoPor } = req.body || {};
+    const cancelled = await cancelAppointment({
+      appointmentId: req.params.id,
+      motivo: motivo || "Cancelado por administración",
+      origen: origen || "admin",
+      canceladoPor: canceladoPor || "Administración"
+    });
+    if (!cancelled) {
+      res.status(404).json({ error: "Turno no encontrado." });
+      return;
+    }
+    res.json(cancelled);
+  } catch (error) {
+    console.error("Error in POST /api/turnos/:id/cancel:", error);
+    res.status(500).json({ error: "Error al cancelar turno" });
+  }
+});
+
+// 8b. PATCH /api/turnos/:id (Admin status / notes update)
 app.patch("/api/turnos/:id", async (req, res) => {
   try {
+    if (req.body?.estado === 'cancelado') {
+      const cancelled = await cancelAppointment({
+        appointmentId: req.params.id,
+        motivo: req.body.motivoCancelacion || req.body.motivo || "Cancelado por administración",
+        origen: req.body.canceladoOrigen || req.body.origen || "admin",
+        canceladoPor: req.body.canceladoPor || "Administración"
+      });
+      if (!cancelled) {
+        res.status(404).json({ error: "Turno no encontrado." });
+        return;
+      }
+      res.json(cancelled);
+      return;
+    }
+
     const updated = await updateAppointment(req.params.id, req.body);
     if (!updated) {
       res.status(404).json({ error: "Turno no encontrado." });
@@ -354,18 +423,23 @@ app.patch("/api/turnos/:id", async (req, res) => {
   }
 });
 
-// 9. DELETE /api/turnos/:id (Admin cancel / remove)
+// 9. DELETE /api/turnos/:id (Admin cancel / archive without physical deletion)
 app.delete("/api/turnos/:id", async (req, res) => {
   try {
-    const deleted = await deleteAppointment(req.params.id);
-    if (!deleted) {
+    const cancelled = await cancelAppointment({
+      appointmentId: req.params.id,
+      motivo: req.body?.motivo || "Cancelado y archivado por administración",
+      origen: req.body?.origen || "admin",
+      canceladoPor: req.body?.canceladoPor || "Administración"
+    });
+    if (!cancelled) {
       res.status(404).json({ error: "Turno no encontrado." });
       return;
     }
-    res.json({ message: "Turno eliminado con éxito." });
+    res.json({ message: "Turno cancelado con éxito.", appointment: cancelled });
   } catch (error) {
     console.error("Error in DELETE /api/turnos/:id:", error);
-    res.status(500).json({ error: "Error al eliminar turno" });
+    res.status(500).json({ error: "Error al cancelar turno" });
   }
 });
 
@@ -725,7 +799,7 @@ app.post("/api/admin/verify-pin", async (req, res) => {
   }
 });
 
-// 13. POST /api/admin/bloquear-horario (Blocks a time range or whole day with collision detection)
+// 13. POST /api/admin/bloquear-horario (Blocks a time range or whole day with collision detection -> unified as AvailabilityException)
 app.post("/api/admin/bloquear-horario", async (req, res) => {
   try {
     const { 
@@ -734,7 +808,8 @@ app.post("/api/admin/bloquear-horario", async (req, res) => {
       horaInicio, 
       horaFin, 
       motivo, 
-      force = false 
+      force = false,
+      profesionalId
     } = req.body;
 
     if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
@@ -743,7 +818,6 @@ app.post("/api/admin/bloquear-horario", async (req, res) => {
     }
 
     const isFullDay = tipo === "dia_completo" || (!horaInicio && !horaFin);
-
     let startM = 0;
     let endM = 24 * 60;
 
@@ -765,6 +839,9 @@ app.post("/api/admin/bloquear-horario", async (req, res) => {
     const nonCancelled = dayAppointments.filter(a => a.estado !== "cancelado");
 
     const conflictingAppointments = nonCancelled.filter(apt => {
+      if (profesionalId && apt.profesionalId && apt.profesionalId !== profesionalId) {
+        return false;
+      }
       if (isFullDay) return true;
       const aptStart = timeToMinutes(apt.horaInicio);
       const aptEnd = timeToMinutes(apt.horaFin);
@@ -790,50 +867,19 @@ app.post("/api/admin/bloquear-horario", async (req, res) => {
       return;
     }
 
-    const config = await getStudioConfig();
-    const diasBloqueados = [...config.diasBloqueados];
-    const bloqueosDetallados = [...(config.bloqueosDetallados || [])];
-    const horariosBloqueados = { ...config.horariosBloqueados };
-
-    const newBlockId = `blk-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    const newBlock = {
-      id: newBlockId,
+    const alcance = profesionalId ? 'profesional' : 'local';
+    const created = await createAvailabilityException({
+      alcance,
+      profesionalId: profesionalId || undefined,
       fecha,
-      tipo: isFullDay ? "dia_completo" as const : "rango_horario" as const,
-      horaInicio: isFullDay ? undefined : horaInicio,
-      horaFin: isFullDay ? undefined : horaFin,
-      motivo: motivo ? String(motivo).trim() : (isFullDay ? "Día cerrado" : "Horario bloqueado por el salón"),
-      createdAt: new Date().toISOString()
-    };
-
-    bloqueosDetallados.unshift(newBlock);
-
-    if (isFullDay) {
-      if (!diasBloqueados.includes(fecha)) {
-        diasBloqueados.push(fecha);
-      }
-    } else {
-      if (!horariosBloqueados[fecha]) {
-        horariosBloqueados[fecha] = [];
-      }
-      for (let m = startM; m < endM; m += 30) {
-        const slotStr = minutesToTime(m);
-        if (!horariosBloqueados[fecha].includes(slotStr)) {
-          horariosBloqueados[fecha].push(slotStr);
-        }
-      }
-    }
-
-    const updated = await updateStudioConfig({ 
-      diasBloqueados, 
-      bloqueosDetallados,
-      horariosBloqueados 
+      tipo: isFullDay ? 'cerrado' : 'horario_especial',
+      intervalos: isFullDay ? [] : [{ inicio: horaInicio, fin: horaFin }],
+      motivo: motivo ? String(motivo).trim() : (isFullDay ? "Día cerrado" : "Horario bloqueado por el salón")
     });
 
     res.json({
-      message: "Bloqueo registrado con éxito en la agenda.",
-      config: updated,
-      block: newBlock,
+      message: "Bloqueo registrado con éxito como excepción de disponibilidad.",
+      exception: created[0],
       conflictsOverridden: conflictingAppointments.length
     });
   } catch (error) {
@@ -842,39 +888,16 @@ app.post("/api/admin/bloquear-horario", async (req, res) => {
   }
 });
 
-// 14. DELETE /api/admin/bloquear-horario/:id (Removes a specific block)
+// 14. DELETE /api/admin/bloquear-horario/:id (Removes a specific block/exception)
 app.delete("/api/admin/bloquear-horario/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const config = await getStudioConfig();
-    const bloqueos = config.bloqueosDetallados || [];
-    const targetBlock = bloqueos.find(b => b.id === id || b.fecha === id);
-
-    const updatedBloqueos = bloqueos.filter(b => b.id !== id && b.fecha !== id);
-    let diasBloqueados = [...config.diasBloqueados];
-    const horariosBloqueados = { ...config.horariosBloqueados };
-
-    if (targetBlock) {
-      if (targetBlock.tipo === "dia_completo") {
-        diasBloqueados = diasBloqueados.filter(d => d !== targetBlock.fecha);
-      } else if (targetBlock.fecha && horariosBloqueados[targetBlock.fecha]) {
-        delete horariosBloqueados[targetBlock.fecha];
-      }
-    } else {
-      // Direct date fallback
-      diasBloqueados = diasBloqueados.filter(d => d !== id);
-      if (horariosBloqueados[id]) {
-        delete horariosBloqueados[id];
-      }
+    const success = await deleteAvailabilityException(id);
+    if (!success) {
+      res.status(404).json({ error: "Bloqueo o excepción no encontrada." });
+      return;
     }
-
-    const updated = await updateStudioConfig({
-      diasBloqueados,
-      bloqueosDetallados: updatedBloqueos,
-      horariosBloqueados
-    });
-
-    res.json({ message: "Bloqueo eliminado con éxito.", config: updated });
+    res.json({ message: "Bloqueo eliminado con éxito." });
   } catch (error) {
     console.error("Error in DELETE /api/admin/bloquear-horario/:id:", error);
     res.status(500).json({ error: "Error al eliminar bloqueo" });
@@ -1261,24 +1284,90 @@ app.get("/api/excepciones-disponibilidad", async (req, res) => {
 // 32. POST /api/excepciones-disponibilidad
 app.post("/api/excepciones-disponibilidad", async (req, res) => {
   try {
-    const { alcance, profesionalId, profesionalIds, fecha, tipo, intervalos, motivo } = req.body;
+    const { alcance, profesionalId, profesionalIds, fecha, tipo, intervalos, motivo, forceCancelConflicts } = req.body;
     if (!alcance || !fecha || !tipo) {
       res.status(400).json({ error: "alcance, fecha y tipo son requeridos" });
       return;
     }
-    const created = await createAvailabilityException({
+
+    const conflicts = await checkConflictingAppointmentsForException({
+      alcance,
+      profesionalId,
+      profesionalIds,
+      fecha,
+      tipo,
+      intervalos
+    });
+
+    if (conflicts.length > 0 && !forceCancelConflicts) {
+      res.status(409).json({
+        error: "Existen turnos afectados por esta excepción de disponibilidad.",
+        conflicts
+      });
+      return;
+    }
+
+    const conflictAppointmentIds = (conflicts.length > 0 && forceCancelConflicts)
+      ? conflicts.map(c => c.id)
+      : [];
+
+    const cancelMotivo = 'Cancelado por parte del salón, por excepción de horarios';
+    const canceladoPor = 'Sistema / Excepción de horarios';
+
+    // 1. First correctly apply operation in database & confirm transaction
+    const { exceptions, cancelledAppointments } = await applyAvailabilityExceptionWithCancellations({
       alcance,
       profesionalId,
       profesionalIds,
       fecha,
       tipo,
       intervalos,
-      motivo
+      motivo,
+      conflictAppointmentIds,
+      cancelMotivo,
+      canceladoPor
     });
-    res.status(201).json(created);
+
+    // 2. AFTER transaction is confirmed in DB, send notifications to each affected client
+    if (cancelledAppointments && cancelledAppointments.length > 0) {
+      for (const apt of cancelledAppointments) {
+        try {
+          const idempotencyKey = `exc-cancel-${apt.id}-${fecha}-${apt.canceladoEn || ''}`;
+          await notificationService.sendAppointmentCancellation(apt, {
+            motivo: cancelMotivo,
+            origen: 'excepcion_disponibilidad',
+            canceladoPor,
+            idempotencyKey
+          });
+        } catch (notifErr) {
+          console.error(`Error sending cancellation email for appointment ${apt.id}:`, notifErr);
+        }
+      }
+    }
+
+    res.status(201).json({
+      exceptions,
+      cancelledCount: cancelledAppointments.length
+    });
   } catch (error) {
     console.error("Error in POST /api/excepciones-disponibilidad:", error);
     res.status(500).json({ error: "Error al crear excepción de disponibilidad" });
+  }
+});
+
+// 32b. GET /api/notifications/logs
+app.get("/api/notifications/logs", async (req, res) => {
+  try {
+    const { appointmentId, channel, limit } = req.query;
+    const logs = await getNotificationLogs({
+      appointmentId: appointmentId ? String(appointmentId) : undefined,
+      channel: channel ? String(channel) : undefined,
+      limit: limit ? parseInt(String(limit), 10) : 50
+    });
+    res.json(logs);
+  } catch (error) {
+    console.error("Error in GET /api/notifications/logs:", error);
+    res.status(500).json({ error: "Error al obtener historial de notificaciones" });
   }
 });
 
@@ -1297,19 +1386,42 @@ app.delete("/api/excepciones-disponibilidad/:id", async (req, res) => {
   }
 });
 
-// 34. POST /api/excepciones-disponibilidad/check-cobertura
+// 34. POST /api/excepciones-disponibilidad/check-conflictos
+app.post("/api/excepciones-disponibilidad/check-conflictos", async (req, res) => {
+  try {
+    const { alcance, profesionalId, profesionalIds, fecha, tipo, intervalos } = req.body;
+    if (!alcance || !fecha || !tipo) {
+      res.status(400).json({ error: "alcance, fecha y tipo son requeridos" });
+      return;
+    }
+    const conflicts = await checkConflictingAppointmentsForException({
+      alcance,
+      profesionalId,
+      profesionalIds,
+      fecha,
+      tipo,
+      intervalos
+    });
+    res.json({ conflicts, hasConflicts: conflicts.length > 0 });
+  } catch (error) {
+    console.error("Error in POST /api/excepciones-disponibilidad/check-conflictos:", error);
+    res.status(500).json({ error: "Error al verificar conflictos de turnos" });
+  }
+});
+
+// 34b. POST /api/excepciones-disponibilidad/check-cobertura
 app.post("/api/excepciones-disponibilidad/check-cobertura", async (req, res) => {
   try {
     const { fecha, profesionalIntervalos } = req.body;
-    if (!fecha || !Array.isArray(profesionalIntervalos)) {
-      res.status(400).json({ error: "fecha e intervalos requeridos" });
+    if (!fecha || typeof fecha !== "string" || !Array.isArray(profesionalIntervalos)) {
+      res.status(400).json({ error: "fecha (string) y profesionalIntervalos (array) son requeridos" });
       return;
     }
     const result = await checkStudioCoverageForProfessionalException(fecha, profesionalIntervalos);
     res.json(result);
   } catch (error) {
     console.error("Error in POST /api/excepciones-disponibilidad/check-cobertura:", error);
-    res.status(500).json({ error: "Error al verificar cobertura del estudio" });
+    res.status(500).json({ error: "Error al verificar cobertura de la excepción" });
   }
 });
 
@@ -1326,6 +1438,329 @@ app.post("/api/excepciones-disponibilidad/auto-extender-local", async (req, res)
   } catch (error) {
     console.error("Error in POST /api/excepciones-disponibilidad/auto-extender-local:", error);
     res.status(500).json({ error: "Error al extender horario del salón" });
+  }
+});
+
+// ============================================================================
+// PROMOTIONS & CLIENT BENEFITS REST API ROUTES
+// ============================================================================
+
+// 36. GET /api/promociones
+app.get("/api/promociones", async (req, res) => {
+  try {
+    const includeInactive = req.query.all === "true";
+    const promotions = await getPromotions(includeInactive);
+    res.json(promotions);
+  } catch (error) {
+    console.error("Error in GET /api/promociones:", error);
+    res.status(500).json({ error: "Error al obtener promociones" });
+  }
+});
+
+// 37. GET /api/promociones/:id
+app.get("/api/promociones/:id", async (req, res) => {
+  try {
+    const promo = await getPromotionById(req.params.id);
+    if (!promo) {
+      res.status(404).json({ error: "Promoción no encontrada" });
+      return;
+    }
+    res.json(promo);
+  } catch (error) {
+    console.error("Error in GET /api/promociones/:id:", error);
+    res.status(500).json({ error: "Error al obtener promoción" });
+  }
+});
+
+// 38. POST /api/promociones
+app.post("/api/promociones", async (req, res) => {
+  try {
+    const {
+      codigo,
+      nombre,
+      descripcion,
+      activo,
+      tipoDescuento,
+      valorDescuento,
+      fechaInicio,
+      fechaVencimiento,
+      limiteTotalUsos,
+      limiteUsoPorCliente,
+      periodoReutilizacionDias,
+      serviciosAplicables,
+      montoMinimo
+    } = req.body;
+
+    if (!codigo || !nombre || valorDescuento == null || !fechaInicio) {
+      res.status(400).json({ error: "Código, nombre, valor de descuento y fecha de inicio son requeridos." });
+      return;
+    }
+
+    const cleanCode = String(codigo).trim().toUpperCase();
+    const existing = await getPromotionByCode(cleanCode);
+    if (existing) {
+      res.status(400).json({ error: `Ya existe una promoción con el código "${cleanCode}".` });
+      return;
+    }
+
+    const created = await createPromotion({
+      codigo: cleanCode,
+      nombre: String(nombre).trim(),
+      descripcion: descripcion ? String(descripcion).trim() : undefined,
+      activo: activo !== false,
+      tipoDescuento: tipoDescuento === "monto_fijo" ? "monto_fijo" : "porcentaje",
+      valorDescuento: Number(valorDescuento),
+      fechaInicio: String(fechaInicio),
+      fechaVencimiento: fechaVencimiento ? String(fechaVencimiento) : null,
+      limiteTotalUsos: limiteTotalUsos != null && limiteTotalUsos !== "" ? Number(limiteTotalUsos) : null,
+      limiteUsoPorCliente: limiteUsoPorCliente != null && limiteUsoPorCliente !== "" ? Number(limiteUsoPorCliente) : null,
+      periodoReutilizacionDias: periodoReutilizacionDias != null && periodoReutilizacionDias !== "" ? Number(periodoReutilizacionDias) : null,
+      serviciosAplicables: Array.isArray(serviciosAplicables) && serviciosAplicables.length > 0 ? serviciosAplicables : ["todos"],
+      montoMinimo: montoMinimo != null && montoMinimo !== "" ? Number(montoMinimo) : null
+    });
+
+    res.status(201).json(created);
+  } catch (error: any) {
+    console.error("Error in POST /api/promociones:", error);
+    res.status(500).json({ error: error.message || "Error al crear promoción" });
+  }
+});
+
+// 39. PUT /api/promociones/:id
+app.put("/api/promociones/:id", async (req, res) => {
+  try {
+    const updated = await updatePromotion(req.params.id, req.body);
+    if (!updated) {
+      res.status(404).json({ error: "Promoción no encontrada" });
+      return;
+    }
+    res.json(updated);
+  } catch (error: any) {
+    console.error("Error in PUT /api/promociones/:id:", error);
+    res.status(500).json({ error: error.message || "Error al actualizar promoción" });
+  }
+});
+
+// 40. DELETE /api/promociones/:id (Soft-delete / deactivate)
+app.delete("/api/promociones/:id", async (req, res) => {
+  try {
+    const success = await deletePromotion(req.params.id);
+    if (!success) {
+      res.status(404).json({ error: "Promoción no encontrada" });
+      return;
+    }
+    res.json({ message: "Promoción desactivada correctamente" });
+  } catch (error) {
+    console.error("Error in DELETE /api/promociones/:id:", error);
+    res.status(500).json({ error: "Error al desactivar promoción" });
+  }
+});
+
+// 41. POST /api/promociones/validar (Validation endpoint with clear error reporting)
+app.post("/api/promociones/validar", async (req, res) => {
+  try {
+    const { codigo, servicioId, precio, clienteId, telefono, email, fecha } = req.body;
+    if (!codigo) {
+      res.status(400).json({ valido: false, error: "Por favor ingresá un código promocional." });
+      return;
+    }
+    const result = await validatePromotion({
+      codigo: String(codigo),
+      servicioId: String(servicioId || ""),
+      precio: Number(precio || 0),
+      clienteId: clienteId ? String(clienteId) : undefined,
+      telefono: telefono ? String(telefono) : undefined,
+      email: email ? String(email) : undefined,
+      fecha: fecha ? String(fecha) : undefined
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    console.error("Error in POST /api/promociones/validar:", error);
+    res.status(500).json({ valido: false, error: error.message || "Error al validar código promocional" });
+  }
+});
+
+// 42. GET /api/promociones-usos
+app.get("/api/promociones-usos", async (req, res) => {
+  try {
+    const { promocionId, clienteId } = req.query;
+    const usages = await getPromotionUsages(
+      promocionId ? String(promocionId) : undefined,
+      clienteId ? String(clienteId) : undefined
+    );
+    res.json(usages);
+  } catch (error) {
+    console.error("Error in GET /api/promociones-usos:", error);
+    res.status(500).json({ error: "Error al obtener historial de usos de promociones" });
+  }
+});
+
+// 43. GET /api/beneficios-cliente
+app.get("/api/beneficios-cliente", async (req, res) => {
+  try {
+    const { clienteId, estado, search } = req.query;
+    const benefits = await getClientBenefits({
+      clienteId: clienteId ? String(clienteId) : undefined,
+      estado: estado ? (String(estado) as any) : undefined,
+      search: search ? String(search) : undefined
+    });
+    res.json(benefits);
+  } catch (error) {
+    console.error("Error in GET /api/beneficios-cliente:", error);
+    res.status(500).json({ error: "Error al obtener beneficios de clientes" });
+  }
+});
+
+// 44. GET /api/beneficios-cliente/disponibles (For identified client in booking flow)
+app.get("/api/beneficios-cliente/disponibles", async (req, res) => {
+  try {
+    const { clienteId, telefono, email, servicioId, precio } = req.query;
+    const available = await getAvailableClientBenefits({
+      clienteId: clienteId ? String(clienteId) : undefined,
+      telefono: telefono ? String(telefono) : undefined,
+      email: email ? String(email) : undefined,
+      servicioId: servicioId ? String(servicioId) : undefined,
+      precio: precio ? Number(precio) : undefined
+    });
+    res.json(available);
+  } catch (error) {
+    console.error("Error in GET /api/beneficios-cliente/disponibles:", error);
+    res.status(500).json({ error: "Error al consultar beneficios disponibles" });
+  }
+});
+
+// 45. POST /api/beneficios-cliente (Admin creates a benefit for client)
+app.post("/api/beneficios-cliente", async (req, res) => {
+  try {
+    const {
+      clienteId,
+      clienteNombre,
+      clienteTelefono,
+      clienteEmail,
+      titulo,
+      descripcion,
+      tipoDescuento,
+      valorDescuento,
+      origen,
+      origenDetalle,
+      fechaEmision,
+      fechaVencimiento,
+      turnoOrigenId,
+      turnoOrigenCodigo,
+      serviciosAplicables,
+      montoMinimo,
+      otorgadoPor
+    } = req.body;
+
+    if (!clienteId || !titulo || valorDescuento == null) {
+      res.status(400).json({ error: "Cliente, título y valor del descuento son requeridos." });
+      return;
+    }
+
+    const created = await createClientBenefit({
+      clienteId: String(clienteId),
+      clienteNombre: clienteNombre ? String(clienteNombre).trim() : undefined,
+      clienteTelefono: clienteTelefono ? String(clienteTelefono).trim() : undefined,
+      clienteEmail: clienteEmail ? String(clienteEmail).trim() : undefined,
+      titulo: String(titulo).trim(),
+      descripcion: descripcion ? String(descripcion).trim() : undefined,
+      tipoDescuento: tipoDescuento === "monto_fijo" ? "monto_fijo" : "porcentaje",
+      valorDescuento: Number(valorDescuento),
+      origen: origen || "admin",
+      origenDetalle: origenDetalle ? String(origenDetalle).trim() : undefined,
+      fechaEmision: fechaEmision ? String(fechaEmision) : new Date().toISOString().split("T")[0],
+      fechaVencimiento: fechaVencimiento ? String(fechaVencimiento) : null,
+      turnoOrigenId: turnoOrigenId ? String(turnoOrigenId) : null,
+      turnoOrigenCodigo: turnoOrigenCodigo ? String(turnoOrigenCodigo) : null,
+      serviciosAplicables: Array.isArray(serviciosAplicables) && serviciosAplicables.length > 0 ? serviciosAplicables : ["todos"],
+      montoMinimo: montoMinimo != null && montoMinimo !== "" ? Number(montoMinimo) : null,
+      otorgadoPor: otorgadoPor ? String(otorgadoPor).trim() : "Administración"
+    });
+
+    res.status(201).json(created);
+  } catch (error: any) {
+    console.error("Error in POST /api/beneficios-cliente:", error);
+    res.status(500).json({ error: error.message || "Error al crear beneficio" });
+  }
+});
+
+// 46. PUT /api/beneficios-cliente/:id
+app.put("/api/beneficios-cliente/:id", async (req, res) => {
+  try {
+    const updated = await updateClientBenefit(req.params.id, req.body);
+    if (!updated) {
+      res.status(404).json({ error: "Beneficio no encontrado" });
+      return;
+    }
+    res.json(updated);
+  } catch (error: any) {
+    console.error("Error in PUT /api/beneficios-cliente/:id:", error);
+    res.status(500).json({ error: error.message || "Error al actualizar beneficio" });
+  }
+});
+
+// 47. POST /api/beneficios-cliente/validar
+app.post("/api/beneficios-cliente/validar", async (req, res) => {
+  try {
+    const { beneficioId, servicioId, precio, clienteId, telefono, email } = req.body;
+    if (!beneficioId) {
+      res.status(400).json({ valido: false, error: "ID de beneficio requerido." });
+      return;
+    }
+    const result = await validateClientBenefit({
+      beneficioId: String(beneficioId),
+      servicioId: String(servicioId || ""),
+      precio: Number(precio || 0),
+      clienteId: clienteId ? String(clienteId) : undefined,
+      telefono: telefono ? String(telefono) : undefined,
+      email: email ? String(email) : undefined
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error("Error in POST /api/beneficios-cliente/validar:", error);
+    res.status(500).json({ valido: false, error: error.message || "Error al validar beneficio" });
+  }
+});
+
+// 48. POST /api/beneficios-cliente/otorgar-compensacion
+app.post("/api/beneficios-cliente/otorgar-compensacion", async (req, res) => {
+  try {
+    const {
+      appointmentId,
+      tipoDescuento,
+      valorDescuento,
+      diasValidez,
+      fechaVencimiento,
+      titulo,
+      descripcion,
+      serviciosAplicables,
+      montoMinimo,
+      otorgadoPor
+    } = req.body;
+
+    if (!appointmentId || valorDescuento == null) {
+      res.status(400).json({ error: "appointmentId y valorDescuento son obligatorios." });
+      return;
+    }
+
+    const benefit = await grantCompensationBenefitForCancelledAppointment({
+      appointmentId: String(appointmentId),
+      tipoDescuento: tipoDescuento === "monto_fijo" ? "monto_fijo" : "porcentaje",
+      valorDescuento: Number(valorDescuento),
+      diasValidez: diasValidez != null && diasValidez !== "" ? Number(diasValidez) : null,
+      fechaVencimiento: fechaVencimiento ? String(fechaVencimiento) : null,
+      titulo: titulo ? String(titulo).trim() : undefined,
+      descripcion: descripcion ? String(descripcion).trim() : undefined,
+      serviciosAplicables: Array.isArray(serviciosAplicables) && serviciosAplicables.length > 0 ? serviciosAplicables : ["todos"],
+      montoMinimo: montoMinimo != null && montoMinimo !== "" ? Number(montoMinimo) : null,
+      otorgadoPor: otorgadoPor ? String(otorgadoPor).trim() : "Administración"
+    });
+
+    res.status(201).json(benefit);
+  } catch (error: any) {
+    console.error("Error in POST /api/beneficios-cliente/otorgar-compensacion:", error);
+    res.status(500).json({ error: error.message || "Error al otorgar compensación" });
   }
 });
 

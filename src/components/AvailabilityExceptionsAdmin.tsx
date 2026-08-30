@@ -42,6 +42,12 @@ interface CoverageModalData {
   profDesc: string;
 }
 
+interface ConflictModalData {
+  fecha: string;
+  conflicts: any[];
+  payload: any;
+}
+
 const getTodayIso = () => {
   const d = new Date();
   const year = d.getFullYear();
@@ -86,6 +92,8 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
 
   // Cartel / Modal state when professional exception exceeds studio schedule
   const [coverageModalData, setCoverageModalData] = useState<CoverageModalData | null>(null);
+  const [conflictModalData, setConflictModalData] = useState<ConflictModalData | null>(null);
+  const [isCancellingConflicts, setIsCancellingConflicts] = useState<boolean>(false);
 
   // Load exceptions
   const loadExceptions = async () => {
@@ -164,8 +172,8 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
   };
 
   // Internal Save Execution
-  const executeSaveException = async () => {
-    const payload = {
+  const executeSaveException = async (forceCancel = false) => {
+    const payloadToUse = conflictModalData ? conflictModalData.payload : {
       alcance: formAlcance,
       profesionalId: formAlcance === 'profesional' && formSelectedProfIds.length === 1 ? formSelectedProfIds[0] : undefined,
       profesionalIds: formAlcance === 'profesional' ? formSelectedProfIds : undefined,
@@ -178,7 +186,10 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
     const res = await fetch('/api/excepciones-disponibilidad', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        ...payloadToUse,
+        forceCancelConflicts: forceCancel
+      })
     });
 
     if (!res.ok) {
@@ -186,13 +197,38 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
       throw new Error(data.error || 'Error al registrar la excepción.');
     }
 
-    setSuccessMsg(`¡Excepción de disponibilidad para el ${formFecha} guardada con éxito!`);
-    setTimeout(() => setSuccessMsg(null), 5000);
+    const data = await res.json().catch(() => ({}));
+    const cancelledCount = data.cancelledCount || 0;
+
+    setSuccessMsg(
+      cancelledCount > 0
+        ? `¡Excepción guardada! Se cancelaron ${cancelledCount} turno(s) afectado(s) correctamente.`
+        : `¡Excepción de disponibilidad para el ${formFecha} guardada con éxito!`
+    );
+    setTimeout(() => setSuccessMsg(null), 6000);
     setIsFormOpen(false);
     setFormMotivo('');
     setFormSelectedProfIds([]);
+    setConflictModalData(null);
     await loadExceptions();
     if (onRefreshData) onRefreshData();
+  };
+
+  const handleConfirmConflictModal = async () => {
+    setIsCancellingConflicts(true);
+    setErrorMsg(null);
+    try {
+      await executeSaveException(true);
+    } catch (err: any) {
+      console.error('Error confirming conflict modal:', err);
+      setErrorMsg(err.message || 'No se pudo aplicar la excepción y cancelar los turnos.');
+    } finally {
+      setIsCancellingConflicts(false);
+    }
+  };
+
+  const handleCancelConflictModal = () => {
+    setConflictModalData(null);
   };
 
   // Submit Exception Handler
@@ -231,6 +267,36 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
     setIsSubmitting(true);
 
     try {
+      const payload = {
+        alcance: formAlcance,
+        profesionalId: formAlcance === 'profesional' && formSelectedProfIds.length === 1 ? formSelectedProfIds[0] : undefined,
+        profesionalIds: formAlcance === 'profesional' ? formSelectedProfIds : undefined,
+        fecha: formFecha,
+        tipo: formTipo,
+        intervalos: formTipo === 'horario_especial' ? formIntervalos : [],
+        motivo: formMotivo.trim() || undefined
+      };
+
+      // 1. Check for conflicting appointments
+      const checkConflictsRes = await fetch('/api/excepciones-disponibilidad/check-conflictos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (checkConflictsRes.ok) {
+        const conflictData = await checkConflictsRes.json();
+        if (conflictData.hasConflicts && conflictData.conflicts.length > 0) {
+          setConflictModalData({
+            fecha: formFecha,
+            conflicts: conflictData.conflicts,
+            payload
+          });
+          setIsSubmitting(false);
+          return;
+        }
+      }
+
       // If configuring special hours for professionals, check coverage against studio schedule
       if (formAlcance === 'profesional' && formTipo === 'horario_especial') {
         const checkRes = await fetch('/api/excepciones-disponibilidad/check-cobertura', {
@@ -245,7 +311,6 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
         if (checkRes.ok) {
           const checkData = await checkRes.json();
           if (checkData.exceedsStudio) {
-            // Show Cartel / Modal with detailed list of exceeded intervals
             const selectedNames = professionals
               .filter(p => formSelectedProfIds.includes(p.id))
               .map(p => `${p.nombre} ${p.apellido}`);
@@ -267,8 +332,7 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
         }
       }
 
-      // If coverage is fine or alcance is local/cerrado, save directly
-      await executeSaveException();
+      await executeSaveException(false);
     } catch (err: any) {
       console.error('Error creating availability exception:', err);
       setErrorMsg(err.message || 'Error al guardar la excepción de disponibilidad.');
@@ -819,6 +883,107 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
                   <>
                     <Sparkles className="w-3.5 h-3.5" />
                     <span>Extender disponibilidad del salón y guardar</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CONFLICT WARNING MODAL FOR RESTRICTIVE EXCEPTIONS */}
+      {conflictModalData && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl border border-[#E8DCD5] space-y-6 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0 text-amber-700">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="font-serif font-bold text-xl text-[#241E1A]">
+                  Turnos afectados detectados
+                </h3>
+                <p className="text-sm text-[#7A6B62]">
+                  La excepción restrictiva para el <strong className="text-[#241E1A]">{formatDateFriendly(conflictModalData.fecha)}</strong> afecta a los siguientes turnos ya reservados:
+                </p>
+              </div>
+            </div>
+
+            {/* List grouped by professional */}
+            <div className="max-h-64 overflow-y-auto space-y-3 pr-1">
+              {Object.entries(
+                conflictModalData.conflicts.reduce((acc: Record<string, any[]>, apt: any) => {
+                  const profName = apt.profesionalNombre || professionals.find(p => p.id === apt.profesionalId)?.nombre || 'Salón / Sin asignar';
+                  if (!acc[profName]) acc[profName] = [];
+                  acc[profName].push(apt);
+                  return acc;
+                }, {})
+              ).map(([profName, apts]: [string, any[]]) => (
+                <div key={profName} className="bg-[#FAF7F2] p-4 rounded-2xl border border-[#E8DCD5] space-y-2">
+                  <h4 className="font-serif font-bold text-xs uppercase tracking-wider text-[#8E4455] flex items-center gap-1.5">
+                    <Users className="w-3.5 h-3.5" />
+                    {profName} ({apts.length} {apts.length === 1 ? 'turno' : 'turnos'})
+                  </h4>
+                  <div className="space-y-2">
+                    {apts.map((apt: any) => (
+                      <div key={apt.id} className="bg-white p-3 rounded-xl border border-[#E8DCD5] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                        <div className="space-y-0.5">
+                          <p className="font-semibold text-[#241E1A]">
+                            {apt.nombre} {apt.apellido}
+                          </p>
+                          <p className="text-[#7A6B62]">
+                            Servicio: <span className="font-medium text-[#241E1A]">{apt.servicioNombre}</span>
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0 font-mono font-bold text-[#8E4455] bg-rose-50/60 px-2.5 py-1 rounded-lg border border-rose-100">
+                          <Clock className="w-3.5 h-3.5" />
+                          <span>{apt.horaInicio} - {apt.horaFin} hs</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Warning details box */}
+            <div className="p-4 rounded-2xl bg-rose-50/80 border border-rose-200 text-xs text-rose-900 space-y-2">
+              <p className="font-bold flex items-center gap-1.5">
+                <Ban className="w-4 h-4 text-rose-700" />
+                Al confirmar esta excepción:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-rose-800/90 pl-1">
+                <li>Los turnos afectados serán <strong>cancelados automáticamente</strong>.</li>
+                <li>Se registrará el motivo: <span className="italic font-medium">“Cancelado por parte del salón, por excepción de horarios”</span>.</li>
+                <li>Se enviará un email de notificación a los clientes afectados.</li>
+              </ul>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handleCancelConflictModal}
+                disabled={isCancellingConflicts}
+                className="px-5 py-2.5 rounded-xl border border-[#E8DCD5] text-xs font-medium text-[#7A6B62] hover:bg-[#FAF7F2] transition-all cursor-pointer disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmConflictModal}
+                disabled={isCancellingConflicts}
+                className="px-5 py-2.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold shadow-md transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isCancellingConflicts ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Cancelando turnos y aplicando...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Confirmar y cancelar turnos afectados</span>
                   </>
                 )}
               </button>

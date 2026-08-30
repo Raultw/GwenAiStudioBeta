@@ -32,7 +32,7 @@ interface AppointmentDetailModalProps {
   appointment: Appointment | null;
   allAppointments: Appointment[];
   onClose: () => void;
-  onUpdateStatus: (id: string, newStatus: AppointmentStatus) => Promise<void>;
+  onUpdateStatus: (id: string, newStatus: AppointmentStatus, cancelMeta?: { motivo?: string; origen?: string; canceladoPor?: string }) => Promise<void | any>;
   onDelete?: (appointment: Appointment) => Promise<void>;
   onSaveNotes?: (id: string, notes: string) => Promise<void>;
   onOpenClientFicha: (clientLookup: { id?: string; telefono?: string; nombre?: string; apellido?: string }) => void;
@@ -66,6 +66,9 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
   const [isSavingNotes, setIsSavingNotes] = useState<boolean>(false);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
 
+  // Cancellation reason state
+  const [cancelReasonInput, setCancelReasonInput] = useState<string>('Cancelación solicitada por la clienta');
+
   // In-modal confirmation dialog state (replaces iframe-blocked window.confirm)
   const [confirmAction, setConfirmAction] = useState<{
     status: AppointmentStatus;
@@ -73,6 +76,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
     message: string;
     confirmBtnText: string;
     confirmBtnColor: string;
+    requireReason?: boolean;
   } | null>(null);
 
   const formatClienteDesdeDate = (iso?: string) => {
@@ -232,10 +236,10 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
   if (!isOpen || !appointment) return null;
 
   // Handle status update
-  const handleStatusChange = async (newStatus: AppointmentStatus) => {
+  const handleStatusChange = async (newStatus: AppointmentStatus, cancelMeta?: { motivo?: string; origen?: string; canceladoPor?: string }) => {
     setActionLoading(true);
     try {
-      await onUpdateStatus(appointment.id, newStatus);
+      await onUpdateStatus(appointment.id, newStatus, cancelMeta);
     } catch (err) {
       console.error('Error changing status:', err);
     } finally {
@@ -445,12 +449,28 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                   </div>
                 </div>
 
-                {/* Monto total */}
+                {/* Monto total con descuento si aplica */}
                 <div className="bg-white px-3.5 py-2 rounded-xl border border-[#E8DCD5] shrink-0 self-start md:self-auto text-left md:text-right">
-                  <span className="text-[10px] text-[#8C7A70] uppercase font-semibold block">Monto total</span>
-                  <span className="font-serif font-bold text-base sm:text-lg text-[#8E4455]">
-                    ${appointment.precio.toLocaleString('es-AR')} ARS
-                  </span>
+                  {appointment.descuentoMonto && appointment.descuentoMonto > 0 ? (
+                    <div>
+                      <span className="text-[10px] text-[#8C7A70] uppercase font-semibold block line-through">
+                        ${(appointment.precioOriginal || appointment.precio).toLocaleString('es-AR')} ARS
+                      </span>
+                      <span className="text-[11px] text-emerald-700 font-semibold block">
+                        🎟️ -${appointment.descuentoMonto.toLocaleString('es-AR')} ({appointment.descuentoNombre || appointment.descuentoCodigo || 'Descuento'})
+                      </span>
+                      <span className="font-serif font-bold text-base sm:text-lg text-[#8E4455] block">
+                        ${(appointment.precioFinal != null ? appointment.precioFinal : appointment.precio).toLocaleString('es-AR')} ARS
+                      </span>
+                    </div>
+                  ) : (
+                    <div>
+                      <span className="text-[10px] text-[#8C7A70] uppercase font-semibold block">Monto total</span>
+                      <span className="font-serif font-bold text-base sm:text-lg text-[#8E4455]">
+                        ${appointment.precio.toLocaleString('es-AR')} ARS
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -471,7 +491,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
               </div>
             </div>
 
-            {/* Notas internas administrativas */}
+              {/* Notas internas administrativas */}
             <div className="bg-[#FAF7F2] p-3.5 rounded-xl border border-[#E8DCD5]">
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-[11px] font-semibold text-[#8C7A70] uppercase tracking-wider flex items-center gap-1.5">
@@ -534,6 +554,44 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                 </p>
               )}
             </div>
+
+            {/* Información de Cancelación (si el turno está cancelado) */}
+            {appointment.estado === 'cancelado' && (
+              <div className="bg-rose-50/90 rounded-xl p-4 border border-rose-200/90 space-y-2.5">
+                <div className="flex items-center gap-2 text-rose-900 font-semibold text-xs border-b border-rose-200/80 pb-2">
+                  <XCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>Registro de Cancelación del Turno</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs text-rose-900">
+                  <div className="bg-white/80 p-2.5 rounded-lg border border-rose-100">
+                    <span className="text-[#8C7A70] text-[10px] uppercase font-bold tracking-wider block mb-0.5">Motivo de Cancelación:</span>
+                    <span className="font-semibold text-[#241E1A]">{appointment.motivoCancelacion || 'Cancelado por administración'}</span>
+                  </div>
+                  <div className="bg-white/80 p-2.5 rounded-lg border border-rose-100">
+                    <span className="text-[#8C7A70] text-[10px] uppercase font-bold tracking-wider block mb-0.5">Fecha y Hora de Cancelación:</span>
+                    <span className="font-medium text-[#241E1A]">
+                      {appointment.canceladoEn ? new Date(appointment.canceladoEn).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' }) : 'No registrada'}
+                    </span>
+                  </div>
+                  <div className="bg-white/80 p-2.5 rounded-lg border border-rose-100">
+                    <span className="text-[#8C7A70] text-[10px] uppercase font-bold tracking-wider block mb-0.5">Origen:</span>
+                    <span className="font-medium text-[#241E1A]">
+                      {appointment.canceladoOrigen === 'excepcion_disponibilidad'
+                        ? 'Excepción de disponibilidad'
+                        : appointment.canceladoOrigen === 'detalle_turno'
+                        ? 'Detalle de turno'
+                        : appointment.canceladoOrigen === 'agenda'
+                        ? 'Agenda'
+                        : appointment.canceladoOrigen || 'Administración'}
+                    </span>
+                  </div>
+                  <div className="bg-white/80 p-2.5 rounded-lg border border-rose-100">
+                    <span className="text-[#8C7A70] text-[10px] uppercase font-bold tracking-wider block mb-0.5">Responsable:</span>
+                    <span className="font-medium text-[#241E1A]">{appointment.canceladoPor || 'Administración'}</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ================================================================= */}
@@ -961,12 +1019,14 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                   type="button"
                   disabled={actionLoading}
                   onClick={() => {
+                    setCancelReasonInput('Cancelación solicitada por la clienta');
                     setConfirmAction({
                       status: 'cancelado',
                       title: '¿Cancelar este turno?',
                       message: `¿Confirmás que deseás cancelar el turno de ${appointment.nombre} ${appointment.apellido} (${appointment.codigo})? El horario quedará liberado en la agenda.`,
                       confirmBtnText: 'Sí, cancelar turno',
-                      confirmBtnColor: 'bg-rose-600 hover:bg-rose-700'
+                      confirmBtnColor: 'bg-rose-600 hover:bg-rose-700',
+                      requireReason: true
                     });
                   }}
                   className="px-4 py-2 rounded-xl text-xs font-semibold text-rose-800 bg-rose-50 border border-rose-200 hover:bg-rose-100 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
@@ -1034,10 +1094,14 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
         {/* Confirmation Modal Overlay */}
         {confirmAction && (
           <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-2xs flex items-center justify-center p-4 rounded-3xl animate-fade-in">
-            <div className="bg-white rounded-2xl p-6 max-w-sm w-full border border-[#E8DCD5] shadow-2xl space-y-4">
+            <div className="bg-white rounded-2xl p-6 max-w-md w-full border border-[#E8DCD5] shadow-2xl space-y-4">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 flex items-center justify-center shrink-0">
-                  <AlertTriangle className="w-5 h-5 text-amber-600" />
+                <div className={`w-10 h-10 rounded-xl ${confirmAction.status === 'cancelado' || confirmAction.status === ('eliminar' as any) ? 'bg-rose-50 border-rose-200 text-rose-800' : 'bg-amber-50 border-amber-200 text-amber-800'} border flex items-center justify-center shrink-0`}>
+                  {confirmAction.status === 'cancelado' || confirmAction.status === ('eliminar' as any) ? (
+                    <XCircle className="w-5 h-5 text-rose-600" />
+                  ) : (
+                    <AlertTriangle className="w-5 h-5 text-amber-600" />
+                  )}
                 </div>
                 <div>
                   <h4 className="font-serif text-base font-bold text-[#241E1A]">
@@ -1049,6 +1113,43 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
               <p className="text-xs text-[#5A4B43] leading-relaxed">
                 {confirmAction.message}
               </p>
+
+              {/* Motivo de cancelación si es cancelación */}
+              {confirmAction.requireReason && (
+                <div className="space-y-2 pt-1 border-t border-[#F0E6DE]">
+                  <label className="block text-xs font-semibold text-[#241E1A]">
+                    Motivo de cancelación:
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      'Cancelación solicitada por la clienta',
+                      'Imprevisto en el salón',
+                      'Reorganización de agenda',
+                      'Cancelado por parte del salón, por excepción de horarios'
+                    ].map(preset => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setCancelReasonInput(preset)}
+                        className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer border text-left ${
+                          cancelReasonInput === preset
+                            ? 'bg-[#8E4455] text-white border-[#8E4455]'
+                            : 'bg-[#FAF7F2] text-[#5A4B43] border-[#E8DCD5] hover:bg-[#E8DCD5]'
+                        }`}
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={cancelReasonInput}
+                    onChange={(e) => setCancelReasonInput(e.target.value)}
+                    placeholder="Escribí el motivo de cancelación..."
+                    className="w-full p-2.5 rounded-xl bg-[#FAF7F2] border border-[#D9C9BF] text-xs text-[#241E1A] focus:outline-none focus:border-[#8E4455] resize-none mt-1"
+                  />
+                </div>
+              )}
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#F0E6DE]">
                 <button
@@ -1064,6 +1165,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                   disabled={actionLoading}
                   onClick={async () => {
                     const nextSt = confirmAction.status;
+                    const reason = cancelReasonInput.trim() || 'Cancelado por administración';
                     setConfirmAction(null);
                     if (nextSt === ('eliminar' as any)) {
                       if (onDelete) {
@@ -1077,6 +1179,12 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                           setActionLoading(false);
                         }
                       }
+                    } else if (nextSt === 'cancelado') {
+                      await handleStatusChange('cancelado', {
+                        motivo: reason,
+                        origen: 'detalle_turno',
+                        canceladoPor: 'Administración'
+                      });
                     } else {
                       await handleStatusChange(nextSt);
                     }

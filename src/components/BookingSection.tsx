@@ -16,10 +16,23 @@ import {
   CalendarPlus,
   CheckCircle2,
   ExternalLink,
-  MessageCircle
+  MessageCircle,
+  Tag,
+  Gift,
+  Percent,
+  X,
+  BadgePercent
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import type { Service, DayAvailability, Appointment, TimeSlot, Professional } from '../types.js';
+import type { 
+  Service, 
+  DayAvailability, 
+  Appointment, 
+  TimeSlot, 
+  Professional, 
+  ClientBenefit, 
+  ValidateDiscountResult 
+} from '../types.js';
 
 interface BookingSectionProps {
   services: Service[];
@@ -46,6 +59,19 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
   const [email, setEmail] = useState<string>('');
   const [observaciones, setObservaciones] = useState<string>('');
 
+  // -------------------------------------------------------------------------
+  // Descuentos, Cupones y Beneficios de Clienta
+  // -------------------------------------------------------------------------
+  const [promoCodeInput, setPromoCodeInput] = useState<string>('');
+  const [isValidatingPromo, setIsValidatingPromo] = useState<boolean>(false);
+  const [validatedPromo, setValidatedPromo] = useState<ValidateDiscountResult | null>(null);
+  const [promoError, setPromoError] = useState<string | null>(null);
+
+  // Beneficios individuales disponibles para la clienta identificada
+  const [availableBenefits, setAvailableBenefits] = useState<ClientBenefit[]>([]);
+  const [selectedBenefitId, setSelectedBenefitId] = useState<string | null>(null);
+  const [isLoadingBenefits, setIsLoadingBenefits] = useState<boolean>(false);
+
   // Anonymous Device Identifier for backend client association
   const getBrowserId = () => {
     try {
@@ -63,6 +89,7 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
   // Refs for smooth focus/scroll
   const confirmationRef = useRef<HTMLDivElement | null>(null);
   const sectionRef = useRef<HTMLElement | null>(null);
+  const promoInputRef = useRef<HTMLInputElement | null>(null);
 
   // Calendar view state
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => new Date());
@@ -274,6 +301,190 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
     setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1));
   };
 
+  // -------------------------------------------------------------------------
+  // Consultar beneficios disponibles para la clienta identificada
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const cleanTel = telefono.trim();
+    const cleanMail = email.trim();
+    const bId = getBrowserId();
+
+    if (!cleanTel && !cleanMail && !bId) {
+      setAvailableBenefits([]);
+      setSelectedBenefitId(null);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsLoadingBenefits(true);
+      try {
+        const queryParams = new URLSearchParams();
+        if (cleanTel) queryParams.set('telefono', cleanTel);
+        if (cleanMail) queryParams.set('email', cleanMail);
+        if (selectedServiceId) queryParams.set('servicioId', selectedServiceId);
+        if (selectedService?.precio) queryParams.set('precio', String(selectedService.precio));
+
+        const res = await fetch(`/api/beneficios-cliente/disponibles?${queryParams.toString()}`);
+        if (res.ok) {
+          const data: ClientBenefit[] = await res.json();
+          setAvailableBenefits(data);
+          if (selectedBenefitId && !data.some(b => b.id === selectedBenefitId)) {
+            setSelectedBenefitId(null);
+          }
+        }
+      } catch (err) {
+        console.error('Error al consultar beneficios de cliente:', err);
+      } finally {
+        setIsLoadingBenefits(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [telefono, email, selectedServiceId, selectedService]);
+
+  // Aplicar código promocional público
+  const handleApplyPromoCode = async () => {
+    const cleanCode = promoCodeInput.trim().toUpperCase();
+    if (!cleanCode) {
+      setPromoError('Por favor ingresá un código promocional.');
+      return;
+    }
+
+    setIsValidatingPromo(true);
+    setPromoError(null);
+
+    try {
+      const res = await fetch('/api/promociones/validar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          codigo: cleanCode,
+          servicioId: selectedServiceId,
+          precio: selectedService ? selectedService.precio : 0,
+          telefono: telefono.trim() || undefined,
+          email: email.trim() || undefined,
+          fecha: selectedDate || undefined
+        })
+      });
+
+      const data: ValidateDiscountResult = await res.json();
+
+      if (res.ok && data.valido) {
+        setValidatedPromo(data);
+        setPromoError(null);
+        // Regla: No acumular beneficios individuales con promociones públicas
+        setSelectedBenefitId(null);
+      } else {
+        setValidatedPromo(null);
+        setPromoError(data.error || 'El código promocional no es válido para este turno.');
+      }
+    } catch (err) {
+      setValidatedPromo(null);
+      setPromoError('Error de comunicación con el servidor al validar el código.');
+    } finally {
+      setIsValidatingPromo(false);
+    }
+  };
+
+  const handleRemovePromo = () => {
+    setValidatedPromo(null);
+    setPromoCodeInput('');
+    setPromoError(null);
+  };
+
+  const handleSelectBenefit = (benefitId: string | null) => {
+    setSelectedBenefitId(benefitId);
+    if (benefitId) {
+      // Regla: No acumular con códigos promocionales
+      setValidatedPromo(null);
+      setPromoCodeInput('');
+      setPromoError(null);
+    }
+  };
+
+  // Re-validar código si el servicio cambia y ya había un código validado
+  useEffect(() => {
+    if (validatedPromo && selectedServiceId) {
+      handleApplyPromoCode();
+    }
+  }, [selectedServiceId]);
+
+  // -------------------------------------------------------------------------
+  // Cálculo de Precios y Descuentos Activos (Mutuamente Excluyentes)
+  // -------------------------------------------------------------------------
+  const discountCalculation = useMemo(() => {
+    const originalPrice = selectedService ? selectedService.precio : 0;
+    if (originalPrice <= 0) {
+      return {
+        hasDiscount: false,
+        tipo: null,
+        descuentoId: undefined,
+        codigo: undefined,
+        nombre: '',
+        originalPrice: 0,
+        discountAmount: 0,
+        finalPrice: 0,
+        label: '',
+        detail: ''
+      };
+    }
+
+    if (validatedPromo && validatedPromo.valido) {
+      const discountAmount = validatedPromo.montoDescontado || 0;
+      const finalPrice = Math.max(0, originalPrice - discountAmount);
+      return {
+        hasDiscount: true,
+        tipo: 'promocion' as const,
+        descuentoId: validatedPromo.descuentoId,
+        codigo: validatedPromo.codigo,
+        nombre: validatedPromo.titulo || validatedPromo.codigo,
+        originalPrice,
+        discountAmount,
+        finalPrice,
+        label: `Cupón ${validatedPromo.codigo}`,
+        detail: validatedPromo.titulo || (validatedPromo.tipoDescuento === 'porcentaje' ? `${validatedPromo.valorDescuento}% OFF` : `$${discountAmount.toLocaleString('es-AR')} OFF`)
+      };
+    }
+
+    if (selectedBenefitId) {
+      const benefit = availableBenefits.find(b => b.id === selectedBenefitId);
+      if (benefit) {
+        let discountAmount = 0;
+        if (benefit.tipoDescuento === 'porcentaje') {
+          discountAmount = Math.round(originalPrice * (benefit.valorDescuento / 100));
+        } else {
+          discountAmount = Math.min(originalPrice, benefit.valorDescuento);
+        }
+        const finalPrice = Math.max(0, originalPrice - discountAmount);
+        return {
+          hasDiscount: true,
+          tipo: 'beneficio' as const,
+          descuentoId: benefit.id,
+          codigo: undefined,
+          nombre: benefit.titulo,
+          originalPrice,
+          discountAmount,
+          finalPrice,
+          label: `Beneficio: ${benefit.titulo}`,
+          detail: benefit.tipoDescuento === 'porcentaje' ? `${benefit.valorDescuento}% OFF` : `$${discountAmount.toLocaleString('es-AR')} OFF`
+        };
+      }
+    }
+
+    return {
+      hasDiscount: false,
+      tipo: null,
+      descuentoId: undefined,
+      codigo: undefined,
+      nombre: '',
+      originalPrice,
+      discountAmount: 0,
+      finalPrice: originalPrice,
+      label: '',
+      detail: ''
+    };
+  }, [selectedService, validatedPromo, selectedBenefitId, availableBenefits]);
+
   // Field validation
   const validate = () => {
     const newErrors: Record<string, string> = {};
@@ -301,6 +512,17 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
     e.preventDefault();
     setSubmitError(null);
 
+    // Regla estricta: Si existe un código escrito pero no validado/válido, impedir confirmar la reserva
+    if (promoCodeInput.trim() !== '' && !validatedPromo) {
+      setPromoError('Tenés un código promocional escrito sin validar. Hacé clic en "Aplicar" para validarlo o borrá el texto para confirmar.');
+      setSubmitError('Hay un código promocional escrito sin validar. Aplicá el cupón o borrá el texto para continuar.');
+      if (promoInputRef.current) {
+        promoInputRef.current.focus();
+        promoInputRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
     if (!validate()) {
       const firstErr = document.querySelector('.form-error-marker');
       firstErr?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -310,7 +532,7 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
     setIsSubmitting(true);
 
     try {
-      const payload = {
+      const payload: any = {
         nombre: nombre.trim(),
         apellido: apellido.trim(),
         telefono: telefono.trim(),
@@ -322,6 +544,15 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
         observaciones: observaciones.trim(),
         browserId: getBrowserId()
       };
+
+      // Incluir descuento aplicado de forma atómica y transaccional
+      if (discountCalculation.hasDiscount) {
+        payload.descuentoTipo = discountCalculation.tipo;
+        payload.descuentoId = discountCalculation.descuentoId;
+        if (discountCalculation.codigo) {
+          payload.descuentoCodigo = discountCalculation.codigo;
+        }
+      }
 
       const res = await fetch('/api/turnos', {
         method: 'POST',
@@ -365,6 +596,10 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
       // Clear Form state
       setSelectedTime('');
       setObservaciones('');
+      setPromoCodeInput('');
+      setValidatedPromo(null);
+      setPromoError(null);
+      setSelectedBenefitId(null);
 
     } catch (err: any) {
       setSubmitError('Error de comunicación con el servidor. Podés intentar nuevamente o comunicarte directamente por WhatsApp.');
@@ -478,10 +713,30 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
                   <span className="font-medium text-[#241E1A]">{confirmedBooking.turno.duracionMinutos} minutos</span>
                 </div>
                 <div>
-                  <span className="text-[#8C7A70] block text-xs">Monto Total:</span>
-                  <span className="font-semibold text-[#8E4455] text-base">
-                    ${confirmedBooking.turno.precio.toLocaleString('es-AR')} ARS
-                  </span>
+                  <span className="text-[#8C7A70] block text-xs">Monto a abonar en el estudio:</span>
+                  {confirmedBooking.turno.descuentoMonto && confirmedBooking.turno.descuentoMonto > 0 ? (
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-[#8C7A70] line-through">
+                          ${(confirmedBooking.turno.precioOriginal || (confirmedBooking.turno.precio + confirmedBooking.turno.descuentoMonto)).toLocaleString('es-AR')}
+                        </span>
+                        <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 inline-flex items-center gap-1">
+                          <Tag className="w-3 h-3" />
+                          <span>-${confirmedBooking.turno.descuentoMonto.toLocaleString('es-AR')} OFF</span>
+                        </span>
+                      </div>
+                      <div className="font-bold text-[#8E4455] text-lg">
+                        ${confirmedBooking.turno.precio.toLocaleString('es-AR')} ARS
+                      </div>
+                      <div className="text-[10px] text-[#7A6B62]">
+                        {confirmedBooking.turno.descuentoNombre || confirmedBooking.turno.descuentoCodigo ? `Aplicado: ${confirmedBooking.turno.descuentoNombre || confirmedBooking.turno.descuentoCodigo}` : 'Descuento aplicado'}
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="font-semibold text-[#8E4455] text-base">
+                      ${confirmedBooking.turno.precio.toLocaleString('es-AR')} ARS
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -970,6 +1225,179 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
                   </div>
                 </div>
 
+                {/* ----------------------------------------------------------- */}
+                {/* Beneficios Individuales & Promociones                       */}
+                {/* ----------------------------------------------------------- */}
+                <div className="pt-6 border-t border-[#E8DCD5] space-y-4">
+                  
+                  {/* Beneficios Personales de la Clienta (Si existen) */}
+                  {availableBenefits.length > 0 && (
+                    <div className="bg-amber-50/50 border border-amber-200/80 rounded-2xl p-4 sm:p-5">
+                      <div className="flex items-center gap-2 mb-2 text-amber-900 font-medium text-xs sm:text-sm">
+                        <Gift className="w-4 h-4 text-amber-700" />
+                        <span>¡Tenés beneficios especiales asignados por el salón!</span>
+                      </div>
+                      <p className="text-[11px] sm:text-xs text-amber-800/80 mb-3">
+                        Podés elegir utilizar uno para esta reserva o guardarlo para tu próximo turno.
+                      </p>
+
+                      <div className="space-y-2">
+                        {availableBenefits.map((benefit) => {
+                          const isSelected = selectedBenefitId === benefit.id;
+                          return (
+                            <div
+                              key={benefit.id}
+                              onClick={() => handleSelectBenefit(isSelected ? null : benefit.id)}
+                              className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
+                                isSelected
+                                  ? 'bg-amber-100/90 border-amber-500 shadow-xs'
+                                  : 'bg-white/80 border-amber-200 hover:bg-white'
+                              }`}
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <div className={`w-4 h-4 rounded-full border mt-0.5 flex items-center justify-center shrink-0 ${
+                                  isSelected ? 'border-amber-600 bg-amber-600 text-white' : 'border-amber-400 bg-white'
+                                }`}>
+                                  {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                                </div>
+                                <div>
+                                  <div className="text-xs font-semibold text-[#241E1A] flex items-center gap-2">
+                                    <span>{benefit.titulo}</span>
+                                    <span className="text-[10px] bg-amber-200/70 text-amber-900 px-1.5 py-0.2 rounded font-bold">
+                                      {benefit.tipoDescuento === 'porcentaje' ? `${benefit.valorDescuento}% OFF` : `-$${benefit.valorDescuento.toLocaleString('es-AR')}`}
+                                    </span>
+                                  </div>
+                                  {benefit.descripcion && (
+                                    <p className="text-[11px] text-[#5A4B43] mt-0.5">{benefit.descripcion}</p>
+                                  )}
+                                  {benefit.fechaVencimiento && (
+                                    <p className="text-[10px] text-[#8C7A70] mt-0.5">
+                                      Válido hasta: {benefit.fechaVencimiento}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSelectBenefit(isSelected ? null : benefit.id);
+                                }}
+                                className={`text-[11px] font-medium px-3 py-1.5 rounded-lg transition-colors shrink-0 ${
+                                  isSelected
+                                    ? 'bg-amber-600 text-white hover:bg-amber-700'
+                                    : 'bg-white border border-amber-300 text-amber-900 hover:bg-amber-100'
+                                }`}
+                              >
+                                {isSelected ? 'Seleccionado' : 'Usar Beneficio'}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {selectedBenefitId && (
+                        <div className="mt-2 text-right">
+                          <button
+                            type="button"
+                            onClick={() => handleSelectBenefit(null)}
+                            className="text-[11px] text-amber-900/80 hover:text-amber-950 underline"
+                          >
+                            Continuar sin usar este beneficio
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Cupón / Código Promocional */}
+                  <div>
+                    <label className="block text-xs font-medium text-[#4A3E39] mb-1.5">
+                      ¿Tenés un código de descuento?
+                    </label>
+
+                    {validatedPromo ? (
+                      <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 text-xs text-emerald-900">
+                          <BadgePercent className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <div>
+                            <span className="font-semibold">{validatedPromo.codigo}</span>
+                            <span className="text-emerald-700 ml-1.5">
+                              ({validatedPromo.titulo || (validatedPromo.tipoDescuento === 'porcentaje' ? `${validatedPromo.valorDescuento}% OFF` : `-$${validatedPromo.montoDescontado?.toLocaleString('es-AR')}`)})
+                            </span>
+                            <span className="block text-[11px] text-emerald-800 font-medium">
+                              ¡Descuento de ${validatedPromo.montoDescontado?.toLocaleString('es-AR')} aplicado!
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleRemovePromo}
+                          className="p-1.5 text-emerald-700 hover:text-emerald-900 hover:bg-emerald-100 rounded-lg transition-colors cursor-pointer"
+                          title="Quitar código"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="flex gap-2">
+                          <div className="relative flex-1">
+                            <Tag className="w-4 h-4 text-[#8C7A70] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                            <input
+                              ref={promoInputRef}
+                              type="text"
+                              value={promoCodeInput}
+                              onChange={(e) => {
+                                setPromoCodeInput(e.target.value.toUpperCase());
+                                if (promoError) setPromoError(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleApplyPromoCode();
+                                }
+                              }}
+                              placeholder="Ej: BIENVENIDA15"
+                              disabled={selectedBenefitId !== null}
+                              className={`w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#FAF7F2] border text-xs font-mono uppercase text-[#241E1A] placeholder-[#A6978E] focus:outline-none focus:bg-white transition-all ${
+                                promoError ? 'border-rose-400 bg-rose-50/20' : 'border-[#D9C9BF] focus:border-[#8E4455]'
+                              } ${selectedBenefitId !== null ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleApplyPromoCode}
+                            disabled={isValidatingPromo || !promoCodeInput.trim() || selectedBenefitId !== null}
+                            className="px-4 py-2.5 bg-[#8E4455] text-white text-xs font-medium rounded-xl hover:bg-[#783645] disabled:opacity-50 disabled:cursor-not-allowed transition-all shrink-0 cursor-pointer flex items-center gap-1.5 shadow-xs"
+                          >
+                            {isValidatingPromo ? (
+                              <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            ) : (
+                              <span>Aplicar</span>
+                            )}
+                          </button>
+                        </div>
+
+                        {promoError && (
+                          <div className="mt-2 text-xs text-rose-600 flex items-start gap-1.5">
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            <span>{promoError}</span>
+                          </div>
+                        )}
+
+                        {selectedBenefitId !== null && (
+                          <p className="mt-1 text-[11px] text-[#8C7A70] italic">
+                            * Ya tenés un beneficio de clienta seleccionado. Los descuentos no son acumulables.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                </div>
+
               </div>
 
             </div>
@@ -1031,14 +1459,36 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
                   )}
                 </div>
 
-                {/* Price total */}
-                <div className="pt-4 pb-6 flex items-baseline justify-between">
-                  <span className="text-sm font-medium text-[#4A3E39]">Total del Servicio:</span>
-                  <div className="text-right">
-                    <span className="font-serif text-3xl font-bold text-[#8E4455]">
-                      ${selectedService ? selectedService.precio.toLocaleString('es-AR') : '0'}
+                {/* Price & Discount breakdown */}
+                <div className="py-4 border-b border-[#E8DCD5] space-y-2">
+                  <div className="flex items-center justify-between text-xs text-[#7A6B62]">
+                    <span>Precio del servicio:</span>
+                    <span className={discountCalculation.hasDiscount ? 'line-through text-[#8C7A70]' : 'font-medium text-[#241E1A]'}>
+                      ${discountCalculation.originalPrice.toLocaleString('es-AR')}
                     </span>
-                    <span className="text-xs text-[#8C7A70] block">ARS · Abonás en el estudio</span>
+                  </div>
+
+                  {discountCalculation.hasDiscount && (
+                    <div className="flex items-center justify-between text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1.5 rounded-lg border border-emerald-200">
+                      <div className="flex items-center gap-1.5">
+                        <Tag className="w-3 h-3 text-emerald-600" />
+                        <span className="font-medium truncate max-w-[170px]">{discountCalculation.label}</span>
+                      </div>
+                      <span className="font-bold">-${discountCalculation.discountAmount.toLocaleString('es-AR')}</span>
+                    </div>
+                  )}
+
+                  <div className="pt-2 flex items-baseline justify-between">
+                    <div>
+                      <span className="text-xs font-semibold text-[#4A3E39] block">Total a abonar:</span>
+                      <span className="text-[10px] text-[#8C7A70]">En el salón al finalizar</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-serif text-3xl font-bold text-[#8E4455]">
+                        ${discountCalculation.finalPrice.toLocaleString('es-AR')}
+                      </span>
+                      <span className="text-[10px] text-[#8C7A70] block">ARS</span>
+                    </div>
                   </div>
                 </div>
 

@@ -10,7 +10,9 @@ import type {
   Professional,
   AvailableProfessionalSummary,
   WeekScheduleMap,
-  DayOfWeekKey
+  DayOfWeekKey,
+  ScheduleScope,
+  AvailabilityExceptionType
 } from '../types.js';
 import {
   getServices,
@@ -190,21 +192,7 @@ export async function getEffectiveStudioSchedule(dateStr: string): Promise<{
     }
   }
 
-  // Check Studio Global Blocks (legacy & detailed)
-  const studioConfig = await getStudioConfig();
-  const isLegacyDateBlocked = (studioConfig.diasBloqueados || []).includes(dateStr);
-  const fullDayBlock = studioConfig.bloqueosDetallados?.find(
-    b => b.fecha === dateStr && b.tipo === 'dia_completo' && (!b.profesionalId || b.profesionalId === 'local')
-  );
 
-  if (isLegacyDateBlocked || fullDayBlock) {
-    return {
-      abierto: false,
-      intervalos: [],
-      motivo: fullDayBlock?.motivo ? `Cerrado: ${fullDayBlock.motivo}` : 'El salón permanecerá cerrado en esta fecha.',
-      isException: false
-    };
-  }
 
   // Calculate day of week
   const [year, month, day] = dateStr.split('-').map(Number);
@@ -232,6 +220,7 @@ export async function getEffectiveStudioSchedule(dateStr: string): Promise<{
   }
 
   // Fallback to StudioConfig horariosPorDia (single interval legacy mapping)
+  const studioConfig = await getStudioConfig();
   const legacyDay = studioConfig.horariosPorDia[dayKey];
   if (!legacyDay || !legacyDay.activo) {
     return {
@@ -286,19 +275,7 @@ export async function getEffectiveProfessionalSchedule(
     }
   }
 
-  // Check specific detailed blocks for this professional
-  const studioConfig = await getStudioConfig();
-  const profFullDayBlock = studioConfig.bloqueosDetallados?.find(
-    b => b.fecha === dateStr && b.tipo === 'dia_completo' && b.profesionalId === profesionalId
-  );
-  if (profFullDayBlock) {
-    return {
-      abierto: false,
-      intervalos: [],
-      motivo: profFullDayBlock.motivo || 'Profesional con bloqueo de jornada completa.',
-      isException: false
-    };
-  }
+
 
   // Calculate day of week
   const [year, month, day] = dateStr.split('-').map(Number);
@@ -624,12 +601,6 @@ export async function calculateAvailability(params: {
   const dayAppointments = await getAppointments({ date: fecha });
   const activeAppointments = dayAppointments.filter(a => a.estado !== 'cancelado');
 
-  // 5. Fetch detailed studio blocks
-  const blockedHoursForDate = studioConfig.horariosBloqueados[fecha] || [];
-  const detailedBlocksForDate = (studioConfig.bloqueosDetallados || []).filter(
-    b => b.fecha === fecha && b.tipo === 'rango_horario' && b.horaInicio && b.horaFin
-  );
-
   // 6. Precompute effective intervals and appointment lists for each professional
   interface ProfContext {
     professional: Professional;
@@ -661,20 +632,11 @@ export async function calculateAvailability(params: {
       return candidateProfessionals.length === 1;
     });
 
-    // Professional specific blocks + studio global blocks
-    const profBlocks = detailedBlocksForDate
-      .filter(b => !b.profesionalId || b.profesionalId === 'local' || b.profesionalId === prof.id)
-      .map(b => ({
-        startM: timeToMinutes(b.horaInicio!),
-        endM: timeToMinutes(b.horaFin!),
-        motivo: b.motivo
-      }));
-
     profContexts.push({
       professional: prof,
       workingIntervals: effectiveWorking,
       appointments: profApts,
-      blocks: profBlocks
+      blocks: []
     });
   }
 
@@ -707,15 +669,7 @@ export async function calculateAvailability(params: {
       continue;
     }
 
-    // Rule: Global studio hour blacklist check
-    if (blockedHoursForDate.includes(slotTimeStr)) {
-      slots.push({
-        hora: slotTimeStr,
-        disponible: false,
-        motivo: 'Horario reservado para mantenimiento o descanso'
-      });
-      continue;
-    }
+
 
     // Evaluate which professionals are available for this slot
     const freeProfessionals: AvailableProfessionalSummary[] = [];
@@ -878,10 +832,7 @@ export async function validateBookingSlot(params: {
     return { valid: false, error: studioSchedule.motivo || 'El local permanecerá cerrado en esa fecha.', profesionalId: '', profesionalNombre: '', duracionMinutos: 0, horaFin: '', precio: 0 };
   }
 
-  // 4. Detailed studio blocks
-  const detailedBlocksForDate = (studioConfig.bloqueosDetallados || []).filter(
-    b => b.fecha === fecha && b.tipo === 'rango_horario' && b.horaInicio && b.horaFin
-  );
+
 
   const dayAppointments = await getAppointments({ date: fecha });
   const nonCancelled = dayAppointments.filter(a => a.estado !== 'cancelado' && a.id !== excludeAppointmentId);
@@ -904,17 +855,7 @@ export async function validateBookingSlot(params: {
       continue;
     }
 
-    // Check blocks
-    const profBlocks = detailedBlocksForDate.filter(b => !b.profesionalId || b.profesionalId === 'local' || b.profesionalId === prof.id);
-    const blockCollision = profBlocks.some(b => {
-      const bStart = timeToMinutes(b.horaInicio!);
-      const bEnd = timeToMinutes(b.horaFin!);
-      return Math.max(startM, bStart) < Math.min(totalOccupiedEndM, bEnd);
-    });
 
-    if (blockCollision) {
-      continue;
-    }
 
     // Check appointment collisions
     const aptCollision = nonCancelled.some(apt => {
@@ -948,3 +889,53 @@ export async function validateBookingSlot(params: {
     precio: 0
   };
 }
+
+export async function checkConflictingAppointmentsForException(payload: {
+  alcance: ScheduleScope;
+  profesionalId?: string;
+  profesionalIds?: string[];
+  fecha: string;
+  tipo: AvailabilityExceptionType;
+  intervalos?: TimeInterval[];
+}): Promise<Appointment[]> {
+  const dayAppointments = await getAppointments({ date: payload.fecha });
+  const activeApts = dayAppointments.filter(a => a.estado !== 'cancelado');
+  const conflicts: Appointment[] = [];
+
+  const targetProfIds = new Set<string>();
+  if (payload.alcance === 'profesional') {
+    if (payload.profesionalId) targetProfIds.add(payload.profesionalId);
+    if (Array.isArray(payload.profesionalIds)) {
+      payload.profesionalIds.forEach(id => targetProfIds.add(id));
+    }
+  }
+
+  for (const apt of activeApts) {
+    if (payload.alcance === 'profesional') {
+      if (!apt.profesionalId || !targetProfIds.has(apt.profesionalId)) {
+        continue;
+      }
+    }
+
+    if (payload.tipo === 'cerrado') {
+      conflicts.push(apt);
+    } else if (payload.tipo === 'horario_especial') {
+      const intervals = payload.intervalos || [];
+      const aptStartM = timeToMinutes(apt.horaInicio);
+      const aptEndM = timeToMinutes(apt.horaFin);
+
+      const isCovered = intervals.some(inv => {
+        const invStartM = timeToMinutes(inv.inicio);
+        const invEndM = timeToMinutes(inv.fin);
+        return aptStartM >= invStartM && aptEndM <= invEndM;
+      });
+
+      if (!isCovered) {
+        conflicts.push(apt);
+      }
+    }
+  }
+
+  return conflicts;
+}
+
