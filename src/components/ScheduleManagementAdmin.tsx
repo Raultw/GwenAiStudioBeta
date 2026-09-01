@@ -25,6 +25,10 @@ import type {
   DayOfWeekKey,
   DayScheduleIntervals 
 } from '../types.js';
+import { 
+  getBusinessDate, 
+  isoDateToAR 
+} from '../utils/dateUtils.js';
 
 interface ScheduleManagementAdminProps {
   professionals?: Professional[];
@@ -72,11 +76,7 @@ const DEFAULT_LOCAL_SCHEDULE: WeekScheduleMap = {
 };
 
 const getTodayIso = () => {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return getBusinessDate();
 };
 
 export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = ({
@@ -116,7 +116,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
     setIsLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch('/api/horarios');
+      const res = await fetch('/api/horarios', { credentials: 'include' });
       if (res.ok) {
         const data: ScheduleConfig[] = await res.json();
         setSchedulesList(data);
@@ -317,6 +317,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
         const checkRes = await fetch('/api/horarios/check-cobertura', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({
             fechaVigencia,
             dias: weekDays,
@@ -349,6 +350,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
       const res = await fetch('/api/horarios', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
@@ -360,8 +362,8 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
       const saved: ScheduleConfig = await res.json();
       setSuccessMsg(
         activeScope === 'local'
-          ? `¡Horario del local guardado con éxito! Vigente a partir del ${saved.fechaVigencia}.`
-          : `¡Horario de ${selectedProfessional?.nombre || 'la profesional'} guardado con éxito! Vigente a partir del ${saved.fechaVigencia}.`
+          ? `¡Horario del local guardado con éxito! Vigente a partir del ${isoDateToAR(saved.fechaVigencia)}.`
+          : `¡Horario de ${selectedProfessional?.nombre || 'la profesional'} guardado con éxito! Vigente a partir del ${isoDateToAR(saved.fechaVigencia)}.`
       );
       setTimeout(() => setSuccessMsg(null), 5000);
       await loadSchedules();
@@ -389,6 +391,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
       const studioRes = await fetch('/api/horarios', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(studioPayload)
       });
       if (!studioRes.ok) {
@@ -406,6 +409,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
       const profRes = await fetch('/api/horarios', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(profPayload)
       });
       if (!profRes.ok) {
@@ -414,7 +418,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
       }
 
       setSuccessMsg(
-        `¡Horario del salón extendido y cronograma de ${coverageModalData.profName} guardado con éxito a partir del ${coverageModalData.fechaVigencia}!`
+        `¡Horario del salón extendido y cronograma de ${coverageModalData.profName} guardado con éxito a partir del ${isoDateToAR(coverageModalData.fechaVigencia)}!`
       );
       setTimeout(() => setSuccessMsg(null), 6000);
       setCoverageModalData(null);
@@ -453,7 +457,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
                   Conflicto con los Horarios del Salón
                 </h4>
                 <p className="text-xs text-[#7A6B62] mt-0.5">
-                  El cronograma de <strong>{coverageModalData.profName}</strong> excede la atención del local a partir del <strong>{coverageModalData.fechaVigencia}</strong>.
+                  El cronograma de <strong>{coverageModalData.profName}</strong> excede la atención del local a partir del <strong>{isoDateToAR(coverageModalData.fechaVigencia)}</strong>.
                 </p>
               </div>
             </div>
@@ -512,7 +516,7 @@ export const ScheduleManagementAdmin: React.FC<ScheduleManagementAdminProps> = (
               <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3 text-[11px] text-emerald-900 flex items-start gap-2">
                 <Sparkles className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                 <span>
-                  Al extender, se actualizará también el cronograma semanal del salón a partir del <strong>{coverageModalData.fechaVigencia}</strong> cubriendo estos horarios.
+                  Al extender, se actualizará también el cronograma semanal del salón a partir del <strong>{isoDateToAR(coverageModalData.fechaVigencia)}</strong> cubriendo estos horarios.
                 </span>
               </div>
             </div>

@@ -34,17 +34,25 @@ import type {
   Service, 
   Client 
 } from '../types.js';
+import { 
+  getBusinessDate, 
+  isoDateToAR, 
+  formatDateAR, 
+  formatDateTimeAR 
+} from '../utils/dateUtils.js';
 
 interface PromotionsManagementAdminProps {
   services: Service[];
   clients?: Client[];
   onRefreshData?: () => void;
+  onAuthError?: () => void;
 }
 
 export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps> = ({
   services,
   clients = [],
-  onRefreshData
+  onRefreshData,
+  onAuthError
 }) => {
   const [subTab, setSubTab] = useState<'promociones' | 'beneficios' | 'historial_usos'>('promociones');
 
@@ -67,7 +75,7 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
     activo: true,
     tipoDescuento: 'porcentaje' as DiscountType,
     valorDescuento: 15,
-    fechaInicio: new Date().toISOString().split('T')[0],
+    fechaInicio: getBusinessDate(),
     fechaVencimiento: '',
     limiteTotalUsos: '',
     limiteUsoPorCliente: '1',
@@ -98,7 +106,7 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
     valorDescuento: 20,
     origen: 'admin' as BenefitOrigin,
     origenDetalle: '',
-    fechaEmision: new Date().toISOString().split('T')[0],
+    fechaEmision: getBusinessDate(),
     fechaVencimiento: '',
     serviciosAplicables: ['todos'] as string[],
     montoMinimo: '',
@@ -118,7 +126,13 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
   const fetchPromotions = async () => {
     setIsLoadingPromotions(true);
     try {
-      const res = await fetch('/api/promociones?all=true');
+      const res = await fetch('/api/promociones?all=true', {
+        credentials: 'include'
+      });
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
       if (res.ok) {
         const data: Promotion[] = await res.json();
         setPromotions(data);
@@ -134,7 +148,13 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
   const fetchBenefits = async () => {
     setIsLoadingBenefits(true);
     try {
-      const res = await fetch('/api/beneficios-cliente');
+      const res = await fetch('/api/beneficios-cliente', {
+        credentials: 'include'
+      });
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
       if (res.ok) {
         const data: ClientBenefit[] = await res.json();
         setBenefits(data);
@@ -151,7 +171,13 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
     setIsLoadingUsages(true);
     try {
       const query = selectedPromoForUsage !== 'all' ? `?promocionId=${selectedPromoForUsage}` : '';
-      const res = await fetch(`/api/promociones-usos${query}`);
+      const res = await fetch(`/api/promociones-usos${query}`, {
+        credentials: 'include'
+      });
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
       if (res.ok) {
         const data: PromotionUsage[] = await res.json();
         setUsages(data);
@@ -166,7 +192,13 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
   // Fetch Clients (if not provided externally)
   const fetchClients = async () => {
     try {
-      const res = await fetch('/api/clientes');
+      const res = await fetch('/api/clientes', {
+        credentials: 'include'
+      });
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         setInternalClients(data);
@@ -251,7 +283,7 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
         activo: true,
         tipoDescuento: 'porcentaje',
         valorDescuento: 15,
-        fechaInicio: new Date().toISOString().split('T')[0],
+        fechaInicio: getBusinessDate(),
         fechaVencimiento: '',
         limiteTotalUsos: '',
         limiteUsoPorCliente: '1',
@@ -308,8 +340,14 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
+
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
 
       const data = await res.json();
 
@@ -334,8 +372,13 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
       const res = await fetch(`/api/promociones/${promo.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ activo: !promo.activo })
       });
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
       if (res.ok) {
         fetchPromotions();
         onRefreshData?.();
@@ -384,7 +427,7 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
         valorDescuento: 20,
         origen: 'admin',
         origenDetalle: '',
-        fechaEmision: new Date().toISOString().split('T')[0],
+        fechaEmision: getBusinessDate(),
         fechaVencimiento: '',
         serviciosAplicables: ['todos'],
         montoMinimo: '',
@@ -442,8 +485,14 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
+
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
 
       const data = await res.json();
 
@@ -608,7 +657,8 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {filteredPromotions.map((promo) => {
-                const isExpired = promo.fechaVencimiento && new Date(promo.fechaVencimiento) < new Date();
+                const todayBusiness = getBusinessDate();
+                const isExpired = promo.fechaVencimiento && promo.fechaVencimiento < todayBusiness;
                 const isExhausted = promo.limiteTotalUsos != null && promo.usosActuales >= promo.limiteTotalUsos;
 
                 return (
@@ -675,7 +725,7 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
                       <div>
                         <span className="text-[#8C7A70] block">Vigencia:</span>
                         <span className="font-medium text-[#241E1A]">
-                          {promo.fechaInicio} al {promo.fechaVencimiento || 'Sin fin'}
+                          {isoDateToAR(promo.fechaInicio)} al {promo.fechaVencimiento ? isoDateToAR(promo.fechaVencimiento) : 'Sin fin'}
                         </span>
                       </div>
 
@@ -831,7 +881,8 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {filteredBenefits.map((benefit) => {
-                const isExpired = benefit.fechaVencimiento && new Date(benefit.fechaVencimiento) < new Date();
+                const todayBusiness = getBusinessDate();
+                const isExpired = benefit.fechaVencimiento && benefit.fechaVencimiento < todayBusiness;
                 return (
                   <div
                     key={benefit.id}
@@ -904,14 +955,14 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
                       <div>
                         <span className="text-[#8C7A70] block">Fecha de emisión:</span>
                         <span className="font-medium text-[#241E1A]">
-                          {benefit.fechaEmision}
+                          {isoDateToAR(benefit.fechaEmision)}
                         </span>
                       </div>
 
                       <div>
                         <span className="text-[#8C7A70] block">Vencimiento:</span>
                         <span className="font-medium text-[#241E1A]">
-                          {benefit.fechaVencimiento || 'Sin vencimiento'}
+                          {benefit.fechaVencimiento ? isoDateToAR(benefit.fechaVencimiento) : 'Sin vencimiento'}
                         </span>
                       </div>
 
@@ -1009,10 +1060,7 @@ export const PromotionsManagementAdmin: React.FC<PromotionsManagementAdminProps>
                     {usages.map((u) => (
                       <tr key={u.id} className="hover:bg-[#FAF7F2]/50 transition-colors">
                         <td className="py-3 px-4 text-[#7A6B62]">
-                          {new Date(u.fechaUso).toLocaleString('es-AR', {
-                            dateStyle: 'short',
-                            timeStyle: 'short'
-                          })}
+                          {formatDateTimeAR(u.fechaUso)}
                         </td>
                         <td className="py-3 px-4 font-mono font-bold text-[#8E4455]">
                           {u.codigoPromocion}

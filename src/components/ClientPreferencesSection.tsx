@@ -168,6 +168,7 @@ export const ClientPreferencesSection: React.FC<ClientPreferencesSectionProps> =
       const res = await fetch(`/api/clientes/${clientId}/preferencias`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(form)
       });
 

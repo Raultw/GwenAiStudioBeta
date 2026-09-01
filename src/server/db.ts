@@ -16,6 +16,9 @@ import type {
   ClientTipConfigItem,
   ClientWithFullProfile,
   User,
+  SafeUser,
+  Session,
+  AuthenticatedContext,
   UserRole,
   Professional,
   ProfessionalService,
@@ -29,12 +32,23 @@ import type {
   Promotion,
   PromotionUsage,
   ClientBenefit,
+  BenefitTemplate,
+  UpdateBenefitResult,
   ValidateDiscountResult,
   DiscountType,
   BenefitStatus,
-  BenefitOrigin
+  BenefitOrigin,
+  AppointmentCancellationResult,
+  ApplyAvailabilityExceptionResult,
+  AuditLog
 } from '../types.js';
 import type { NotificationLog } from './notifications/types.js';
+import { 
+  getBusinessDate, 
+  isoDateToAR, 
+  formatDateAR,
+  addDaysToIsoDate
+} from '../utils/dateUtils.js';
 import { 
   normalizeText, 
   normalizePersonName,
@@ -222,6 +236,19 @@ export const defaultProfessional: Professional = {
 };
 
 // Password hashing helper (Salted Scrypt)
+export function timeToMinutes(timeStr: string): number {
+  if (!timeStr || !timeStr.includes(':')) return 0;
+  const [h, m] = timeStr.split(':').map(Number);
+  return (isNaN(h) ? 0 : h) * 60 + (isNaN(m) ? 0 : m);
+}
+
+export function minutesToTime(minutes: number): string {
+  const normalized = Math.max(0, Math.min(24 * 60 - 1, minutes));
+  const h = Math.floor(normalized / 60);
+  const m = normalized % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 export function hashPassword(password: string, customSalt?: string): { hash: string; salt: string } {
   const salt = customSalt || crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
@@ -237,20 +264,54 @@ export function verifyPassword(password: string, salt: string, expectedHash: str
   }
 }
 
-const defaultAdminCreds = hashPassword("admin123", "a1b2c3d4e5f678901234567890abcdef");
+export function validatePasswordPolicy(pass: string): { valid: boolean; error?: string } {
+  if (!pass || typeof pass !== 'string') {
+    return { valid: false, error: 'Contraseña requerida.' };
+  }
+  if (/^\s+$/.test(pass)) {
+    return { valid: false, error: 'La contraseña no puede consistir únicamente en espacios.' };
+  }
+  if (pass.length < 12) {
+    return { valid: false, error: 'La contraseña debe tener al menos 12 caracteres.' };
+  }
+  if (pass.length > 128) {
+    return { valid: false, error: 'La contraseña no puede exceder los 128 caracteres.' };
+  }
+  if (!/[a-z]/.test(pass)) {
+    return { valid: false, error: 'La contraseña debe contener al menos una letra minúscula.' };
+  }
+  if (!/[A-Z]/.test(pass)) {
+    return { valid: false, error: 'La contraseña debe contener al menos una letra mayúscula.' };
+  }
+  if (!/[0-9]/.test(pass)) {
+    return { valid: false, error: 'La contraseña debe contener al menos un número.' };
+  }
+  if (!/[^a-zA-Z0-9]/.test(pass)) {
+    return { valid: false, error: 'La contraseña debe contener al menos un símbolo especial.' };
+  }
+  return { valid: true };
+}
 
-export const defaultUserAdmin: User = {
-  id: "user-admin-1",
-  email: "admin@gwennails.com",
-  passwordHash: defaultAdminCreds.hash,
-  salt: defaultAdminCreds.salt,
-  rol: "admin",
-  profesionalId: "prof-default-1",
-  activo: true,
-  nombre: "Administrador Gwen",
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString()
-};
+export function generateSecureTemporaryPassword(): string {
+  const lowercase = 'abcdefghijklmnopqrstuvwxyz';
+  const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const numbers = '0123456789';
+  const symbols = '!@#$%^&*()_+-=[]{}|;:,.<>?';
+  const all = lowercase + uppercase + numbers + symbols;
+
+  let pass = '';
+  pass += lowercase[crypto.randomInt(lowercase.length)];
+  pass += uppercase[crypto.randomInt(uppercase.length)];
+  pass += numbers[crypto.randomInt(numbers.length)];
+  pass += symbols[crypto.randomInt(symbols.length)];
+
+  for (let i = pass.length; i < 14; i++) {
+    pass += all[crypto.randomInt(all.length)];
+  }
+
+  return pass.split('').sort(() => 0.5 - Math.random()).join('');
+}
+
 
 export const defaultStudioSchedule: ScheduleConfig = {
   id: "sched-local-default",
@@ -337,6 +398,36 @@ export const defaultPromotions: Promotion[] = [
   }
 ];
 
+// Default initial benefit templates (catalogo administrativo de tipos de beneficios)
+export const defaultBenefitTemplates: BenefitTemplate[] = [
+  {
+    id: "template-comp-20",
+    nombrePublico: "20% de descuento en tu próxima visita",
+    descripcionPublica: "Descuento de cortesía para tu próxima cita",
+    tipoDescuento: "porcentaje",
+    valorDescuento: 20,
+    vigenciaDias: 30,
+    serviciosAplicables: ["todos"],
+    montoMinimo: null,
+    activo: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  },
+  {
+    id: "template-comp-5000",
+    nombrePublico: "$5.000 de descuento en tu próxima visita",
+    descripcionPublica: "Monto fijo de compensación para tu próxima cita",
+    tipoDescuento: "monto_fijo",
+    valorDescuento: 5000,
+    vigenciaDias: 60,
+    serviciosAplicables: ["todos"],
+    montoMinimo: null,
+    activo: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }
+];
+
 // In-Memory & Local File Fallback Engine
 const DATA_DIR = path.join(process.cwd(), "data");
 const DATA_FILE = path.join(DATA_DIR, "gwen_db.json");
@@ -358,9 +449,12 @@ interface FallbackDb {
   promotions: Promotion[];
   promotionUsages: PromotionUsage[];
   clientBenefits: ClientBenefit[];
+  benefitTemplates: BenefitTemplate[];
+  sessions: Session[];
+  auditLogs: AuditLog[];
 }
 
-const memoryDb: FallbackDb = {
+export const memoryDb: FallbackDb = {
   services: defaultServices,
   appointments: [],
   clients: [],
@@ -368,7 +462,7 @@ const memoryDb: FallbackDb = {
   clientPreferences: [],
   clientTipsConfig: [],
   config: defaultStudioConfig,
-  users: [defaultUserAdmin],
+  users: [],
   professionals: [defaultProfessional],
   professionalServices: defaultServices.map(s => ({
     id: `ps-${defaultProfessional.id}-${s.id}`,
@@ -382,8 +476,19 @@ const memoryDb: FallbackDb = {
   notificationLogs: [],
   promotions: defaultPromotions,
   promotionUsages: [],
-  clientBenefits: []
+  clientBenefits: [],
+  benefitTemplates: defaultBenefitTemplates,
+  sessions: [],
+  auditLogs: []
 };
+
+export function getMemoryDb(): FallbackDb {
+  return memoryDb;
+}
+
+export function setMemoryDb(newDb: Partial<FallbackDb>) {
+  Object.assign(memoryDb, newDb);
+}
 
 function loadLocalFileDb() {
   try {
@@ -438,6 +543,12 @@ function loadLocalFileDb() {
       if (parsed.clientBenefits && Array.isArray(parsed.clientBenefits)) {
         memoryDb.clientBenefits = parsed.clientBenefits;
       }
+      if (parsed.benefitTemplates && Array.isArray(parsed.benefitTemplates)) {
+        memoryDb.benefitTemplates = parsed.benefitTemplates;
+      }
+      if (parsed.sessions && Array.isArray(parsed.sessions)) {
+        memoryDb.sessions = parsed.sessions;
+      }
       if (parsed.config) {
         memoryDb.config = { ...defaultStudioConfig, ...parsed.config };
       }
@@ -489,6 +600,14 @@ if (connectionString) {
  * If not connected, initializes the local fallback database.
  */
 export async function initDatabase() {
+  if (process.env.TEST_MEMORY_ONLY === 'true') {
+    isPostgresConnected = false;
+    pgPool = null;
+    loadLocalFileDb();
+    await checkAndExecuteSuperadminBootstrap();
+    return;
+  }
+
   const isProd = process.env.NODE_ENV === 'production';
   if (!connectionString && isProd) {
     const errMsg = 'ERROR CRÍTICO: DATABASE_URL es obligatoria en entorno de producción. El fallback JSON no está permitido en producción.';
@@ -602,6 +721,25 @@ export async function initDatabase() {
           CREATE INDEX IF NOT EXISTS idx_appointments_descuento ON appointments(descuento_id, descuento_codigo);
         `);
 
+        try {
+          await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_unique_slot ON appointments(profesional_id, fecha, hora_inicio) WHERE estado != 'cancelado';`);
+        } catch (indexErr: any) {
+          console.warn('[DB] Warning: Could not create idx_appointments_unique_slot due to existing duplicate slots. Cleaning up duplicates...');
+          await client.query(`
+            UPDATE appointments 
+            SET estado = 'cancelado', motivo_cancelacion = 'Duplicado automático por restricción de slot único'
+            WHERE id IN (
+              SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY profesional_id, fecha, hora_inicio ORDER BY created_at DESC) as rn
+                FROM appointments
+                WHERE estado != 'cancelado'
+              ) t WHERE t.rn > 1
+            );
+          `);
+          await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_unique_slot ON appointments(profesional_id, fecha, hora_inicio) WHERE estado != 'cancelado';`);
+          console.log('[DB] idx_appointments_unique_slot created successfully after duplicate cleanup.');
+        }
+
         // 4. Create Studio Config Table
         await client.query(`
           CREATE TABLE IF NOT EXISTS studio_config (
@@ -687,23 +825,43 @@ export async function initDatabase() {
           CREATE INDEX IF NOT EXISTS idx_professionals_activo ON professionals(activo);
         `);
 
-        // 9. Create Users Table
+        // 9. Create Users Table & Audit Logs Table
         await client.query(`
           CREATE TABLE IF NOT EXISTS users (
             id VARCHAR(64) PRIMARY KEY,
-            email VARCHAR(255) NOT NULL UNIQUE,
+            username VARCHAR(255) UNIQUE,
+            email VARCHAR(255),
             password_hash VARCHAR(255) NOT NULL,
             salt VARCHAR(64) NOT NULL,
-            rol VARCHAR(32) NOT NULL DEFAULT 'empleado',
+            rol VARCHAR(32) NOT NULL DEFAULT 'professional',
             profesional_id VARCHAR(64) REFERENCES professionals(id) ON DELETE SET NULL,
             activo BOOLEAN DEFAULT TRUE,
             nombre VARCHAR(255),
+            must_change_password BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
           );
 
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(255) UNIQUE;
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE;
+
+          CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
           CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
           CREATE INDEX IF NOT EXISTS idx_users_activo ON users(activo);
+
+          CREATE TABLE IF NOT EXISTS audit_logs (
+            id VARCHAR(64) PRIMARY KEY,
+            actor_id VARCHAR(64),
+            actor_name VARCHAR(255),
+            target_user_id VARCHAR(64),
+            evento VARCHAR(64) NOT NULL,
+            fecha TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            origen VARCHAR(64),
+            metadata JSONB
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_audit_logs_evento ON audit_logs(evento);
+          CREATE INDEX IF NOT EXISTS idx_audit_logs_fecha ON audit_logs(fecha);
         `);
 
         // 10. Create Professional Services Table (Many-to-Many)
@@ -766,12 +924,29 @@ export async function initDatabase() {
             message TEXT,
             idempotency_key VARCHAR(128) UNIQUE,
             error TEXT,
-            sent_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            sent_at TIMESTAMP WITH TIME ZONE,
+            processing_started_at TIMESTAMP WITH TIME ZONE,
+            lease_expires_at TIMESTAMP WITH TIME ZONE,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            next_attempt_at TIMESTAMP WITH TIME ZONE,
+            provider_message_id VARCHAR(255),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             metadata JSONB
           );
 
+          ALTER TABLE notification_logs ALTER COLUMN sent_at DROP DEFAULT;
+          ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMP WITH TIME ZONE;
+          ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMP WITH TIME ZONE;
+          ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3;
+          ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMP WITH TIME ZONE;
+          ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR(255);
+          ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+
           CREATE INDEX IF NOT EXISTS idx_notif_logs_apt ON notification_logs(appointment_id);
           CREATE INDEX IF NOT EXISTS idx_notif_logs_idempotency ON notification_logs(idempotency_key);
+          CREATE INDEX IF NOT EXISTS idx_notif_logs_next_attempt ON notification_logs(status, next_attempt_at);
         `);
 
         // 14. Create Promotions Table
@@ -857,6 +1032,73 @@ export async function initDatabase() {
           CREATE UNIQUE INDEX IF NOT EXISTS idx_client_benefits_turno_origen ON client_benefits(turno_origen_id) WHERE turno_origen_id IS NOT NULL;
         `);
 
+        // 17. Create Sessions Table (Opaque random token SHA-256 hash sessions)
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS sessions (
+            id VARCHAR(64) PRIMARY KEY,
+            token_hash VARCHAR(128) NOT NULL UNIQUE,
+            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            revoked_at TIMESTAMP WITH TIME ZONE,
+            last_activity_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+          CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+          CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+        `);
+
+        // 18. Create Benefit Templates Table (Catálogo administrativo reutilizable)
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS benefit_templates (
+            id VARCHAR(64) PRIMARY KEY,
+            nombre_publico VARCHAR(255) NOT NULL,
+            descripcion_publica TEXT,
+            tipo_descuento VARCHAR(32) NOT NULL DEFAULT 'porcentaje',
+            valor_descuento NUMERIC NOT NULL,
+            vigencia_dias INTEGER NOT NULL DEFAULT 30,
+            servicios_aplicables JSONB NOT NULL DEFAULT '["todos"]',
+            monto_minimo NUMERIC,
+            activo BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            CONSTRAINT chk_benefit_template_tipo CHECK (tipo_descuento IN ('porcentaje', 'monto_fijo')),
+            CONSTRAINT chk_benefit_template_valor CHECK (valor_descuento > 0),
+            CONSTRAINT chk_benefit_template_vigencia CHECK (vigencia_dias > 0)
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_benefit_templates_activo ON benefit_templates(activo);
+
+          ALTER TABLE client_benefits ADD COLUMN IF NOT EXISTS template_id VARCHAR(64);
+          CREATE INDEX IF NOT EXISTS idx_client_benefits_template_id ON client_benefits(template_id);
+        `);
+
+        // Seed initial benefit templates if empty
+        const btplCountRes = await client.query('SELECT COUNT(*) FROM benefit_templates');
+        if (parseInt(btplCountRes.rows[0].count, 10) === 0) {
+          console.log('🌱 Seeding initial benefit templates to PostgreSQL...');
+          for (const btpl of defaultBenefitTemplates) {
+            await client.query(`
+              INSERT INTO benefit_templates (
+                id, nombre_publico, descripcion_publica, tipo_descuento, valor_descuento,
+                vigencia_dias, servicios_aplicables, monto_minimo, activo, created_at, updated_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+              ON CONFLICT (id) DO NOTHING;
+            `, [
+              btpl.id,
+              btpl.nombrePublico,
+              btpl.descripcionPublica || null,
+              btpl.tipoDescuento,
+              btpl.valorDescuento,
+              btpl.vigenciaDias,
+              JSON.stringify(btpl.serviciosAplicables || ['todos']),
+              btpl.montoMinimo || null,
+              btpl.activo
+            ]);
+          }
+        }
+
         // Seed initial promotions if empty
         const promoCountRes = await client.query('SELECT COUNT(*) FROM promotions');
         if (parseInt(promoCountRes.rows[0].count, 10) === 0) {
@@ -935,25 +1177,8 @@ export async function initDatabase() {
           ]);
         }
 
-        // Seed initial users if empty
-        const userCount = await client.query('SELECT COUNT(*) FROM users');
-        if (parseInt(userCount.rows[0].count, 10) === 0) {
-          console.log('🌱 Seeding default admin user to PostgreSQL...');
-          await client.query(`
-            INSERT INTO users (id, email, password_hash, salt, rol, profesional_id, activo, nombre, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
-            ON CONFLICT (id) DO NOTHING;
-          `, [
-            defaultUserAdmin.id,
-            defaultUserAdmin.email,
-            defaultUserAdmin.passwordHash,
-            defaultUserAdmin.salt,
-            defaultUserAdmin.rol,
-            defaultUserAdmin.profesionalId || null,
-            defaultUserAdmin.activo,
-            defaultUserAdmin.nombre || null
-          ]);
-        }
+        // Check and execute superadmin bootstrap if no active superadmin exists
+        await checkAndExecuteSuperadminBootstrap();
 
         // Seed professional_services relations if empty
         const psCount = await client.query('SELECT COUNT(*) FROM professional_services');
@@ -1178,9 +1403,9 @@ export async function getClients(filter?: {
   const studioConfig = await getStudioConfig();
   const diasInactividad = studioConfig.diasInactividadCliente || 60;
   const minRecurrente = studioConfig.minTurnosRecurrente || 2;
-  const todayStr = new Date().toISOString().split('T')[0];
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  const inactivityDaysAgo = new Date(Date.now() - diasInactividad * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const todayStr = getBusinessDate();
+  const thirtyDaysAgo = getBusinessDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+  const inactivityDaysAgo = getBusinessDate(new Date(Date.now() - diasInactividad * 24 * 60 * 60 * 1000));
 
   const allActiveAlerts = await getClientAlerts(undefined, true);
   const allAppointments = await getAppointments();
@@ -1517,7 +1742,7 @@ export async function findOrCreateClientForBooking(incoming: {
     telefono: incoming.telefono,
     email: incoming.email,
     fechaAlta: new Date().toISOString(),
-    fechaUltimaVisita: incoming.fecha || new Date().toISOString().split('T')[0],
+    fechaUltimaVisita: incoming.fecha || getBusinessDate(),
     activo: true,
     browserId: incoming.browserId
   };
@@ -1644,7 +1869,7 @@ export async function mergeClients(primaryId: string, secondaryId: string, admin
   if (primary.notasAdmin) combinedNotesParts.push(primary.notasAdmin);
   if (secondary.notasAdmin) combinedNotesParts.push(`[Nota previa cuenta fusionada]: ${secondary.notasAdmin}`);
   if (adminNotes) combinedNotesParts.push(`[Fusión realizada]: ${adminNotes}`);
-  combinedNotesParts.push(`[Historial]: Fusión de cliente ${secondary.nombre} ${secondary.apellido} (Tel: ${secondary.telefono}) el ${new Date().toLocaleDateString('es-AR')}`);
+  combinedNotesParts.push(`[Historial]: Fusión de cliente ${secondary.nombre} ${secondary.apellido} (Tel: ${secondary.telefono}) el ${formatDateAR(new Date())}`);
 
   const mergedNotes = combinedNotesParts.join('\n\n');
 
@@ -1720,8 +1945,8 @@ export async function getClientStats(): Promise<ClientStats> {
   const studioConfig = await getStudioConfig();
   const diasInactividad = studioConfig.diasInactividadCliente || 60;
   const minRecurrente = studioConfig.minTurnosRecurrente || 2;
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  const inactivityDaysAgo = new Date(Date.now() - diasInactividad * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const thirtyDaysAgo = getBusinessDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+  const inactivityDaysAgo = getBusinessDate(new Date(Date.now() - diasInactividad * 24 * 60 * 60 * 1000));
 
   const totalClientes = clients.length;
   const clientesNuevos = clients.filter(c => c.fechaAlta >= thirtyDaysAgo || (c.primerTurnoFecha && c.primerTurnoFecha >= thirtyDaysAgo)).length;
@@ -1795,7 +2020,7 @@ export async function createClientAlert(alertData: Omit<ClientAlert, 'id' | 'cre
     tipo: alertData.tipo,
     descripcion: alertData.descripcion.trim(),
     productoServicioRelacionado: alertData.productoServicioRelacionado?.trim() || undefined,
-    fecha: alertData.fecha || now.split('T')[0],
+    fecha: alertData.fecha || getBusinessDate(),
     severidad: alertData.severidad || 'moderada',
     activa: alertData.activa !== undefined ? alertData.activa : true,
     observaciones: alertData.observaciones?.trim() || undefined,
@@ -2355,6 +2580,16 @@ function mapAppointmentRow(row: any): Appointment {
 }
 
 export async function createAppointment(apt: Appointment): Promise<Appointment> {
+  // Defensive No-Stacking rule: strictly reject if both a promotion and client benefit are present
+  const promoCodeClean = typeof apt.descuentoCodigo === 'string' ? apt.descuentoCodigo.trim() : '';
+  const discountIdClean = typeof apt.descuentoId === 'string' ? apt.descuentoId.trim() : '';
+  const hasPromo = promoCodeClean.length > 0 || apt.descuentoTipo === 'promocion';
+  const hasBenefit = (apt.descuentoTipo === 'beneficio' && discountIdClean.length > 0);
+
+  if ((hasPromo && hasBenefit) || (promoCodeClean.length > 0 && apt.descuentoTipo === 'beneficio')) {
+    throw new Error('No se puede aplicar una promoción y un beneficio individual en la misma reserva.');
+  }
+
   // Ensure client exists and link client_id
   if (!apt.clienteId) {
     const client = await findOrCreateClientForBooking({
@@ -2380,18 +2615,44 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
     try {
       await client.query('BEGIN');
 
-      // Concurrency check within transaction using table lock or explicit check for overlap
+      // 1. Transactional Advisory Lock on (profesional_id, fecha)
+      // Serializes concurrent booking transactions targeting the same professional and date.
+      // Generates deterministic integer keys using PostgreSQL native hashtext($1::text), hashtext($2::text).
+      // Automatically released upon COMMIT or ROLLBACK.
       if (apt.profesionalId) {
-        const overlapRes = await client.query(`
-          SELECT id FROM appointments
+        await client.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+          [apt.profesionalId, apt.fecha]
+        );
+
+        // Fetch buffer configuration
+        const studioCfgRes = await client.query('SELECT config FROM studio_config WHERE id = $1', ['default']);
+        const studioCfg = studioCfgRes.rows.length > 0 && studioCfgRes.rows[0].config
+          ? (typeof studioCfgRes.rows[0].config === 'string' ? JSON.parse(studioCfgRes.rows[0].config) : studioCfgRes.rows[0].config)
+          : defaultStudioConfig;
+        const bufferMinutos = Number(studioCfg.bufferMinutos || 0);
+
+        // 2. Fetch all active appointments for this professional and date inside the advisory lock
+        const activeAptsRes = await client.query(`
+          SELECT id, hora_inicio, hora_fin, duracion_minutos
+          FROM appointments
           WHERE profesional_id = $1 
             AND fecha = $2 
             AND estado != 'cancelado'
-            AND NOT (hora_fin <= $3 OR hora_inicio >= $4)
-          FOR UPDATE
-        `, [apt.profesionalId, apt.fecha, apt.horaInicio, apt.horaFin]);
+        `, [apt.profesionalId, apt.fecha]);
 
-        if (overlapRes.rows.length > 0) {
+        const startM = timeToMinutes(apt.horaInicio);
+        const endM = timeToMinutes(apt.horaFin) || (startM + (apt.duracionMinutos || 60));
+        const totalOccupiedEndM = endM + bufferMinutos;
+
+        const hasOverlap = activeAptsRes.rows.some(row => {
+          if (row.id === apt.id) return false;
+          const aptStart = timeToMinutes(row.hora_inicio);
+          const aptEnd = timeToMinutes(row.hora_fin) + bufferMinutos;
+          return Math.max(startM, aptStart) < Math.min(totalOccupiedEndM, aptEnd);
+        });
+
+        if (hasOverlap) {
           await client.query('ROLLBACK');
           throw new Error('El horario seleccionado ya ha sido reservado por otra solicitud simultánea. Por favor elegí otro horario.');
         }
@@ -2400,8 +2661,9 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
       // ---------------------------------------------------------------------
       // TRANSACTIONAL DISCOUNT / BENEFIT CONSUMPTION & RE-VALIDATION
       // ---------------------------------------------------------------------
-      if (apt.descuentoCodigo || apt.descuentoTipo === 'promocion') {
-        const promoCode = (apt.descuentoCodigo || '').trim().toUpperCase();
+      const cleanAptPromoCode = (apt.descuentoCodigo || '').trim().toUpperCase();
+      if (cleanAptPromoCode.length > 0 || apt.descuentoTipo === 'promocion') {
+        const promoCode = cleanAptPromoCode;
         const promoRes = await client.query(`
           SELECT * FROM promotions WHERE UPPER(codigo) = $1 FOR UPDATE
         `, [promoCode]);
@@ -2417,14 +2679,14 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
           throw new Error(`La promoción "${promo.nombre}" ya no se encuentra activa.`);
         }
 
-        const todayStr = apt.fecha || new Date().toISOString().split('T')[0];
+        const todayStr = apt.fecha || getBusinessDate();
         if (promo.fecha_inicio && todayStr < promo.fecha_inicio) {
           await client.query('ROLLBACK');
-          throw new Error(`La promoción "${promo.nombre}" aún no está vigente (inicia el ${promo.fecha_inicio}).`);
+          throw new Error(`La promoción "${promo.nombre}" aún no está vigente (inicia el ${isoDateToAR(promo.fecha_inicio)}).`);
         }
         if (promo.fecha_vencimiento && todayStr > promo.fecha_vencimiento) {
           await client.query('ROLLBACK');
-          throw new Error(`La promoción "${promo.nombre}" ha vencido el ${promo.fecha_vencimiento}.`);
+          throw new Error(`La promoción "${promo.nombre}" ha vencido el ${isoDateToAR(promo.fecha_vencimiento)}.`);
         }
 
         // Total usage limit check
@@ -2480,7 +2742,7 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
           if (daysElapsed < promo.periodo_reutilizacion_dias) {
             const reusableDate = new Date(lastDate + promo.periodo_reutilizacion_dias * 86400000);
             await client.query('ROLLBACK');
-            throw new Error(`Ya has utilizado esta promoción. Podrás volver a utilizarla a partir del ${reusableDate.toLocaleDateString('es-AR')}.`);
+            throw new Error(`Ya has utilizado esta promoción. Podrás volver a utilizarla a partir del ${formatDateAR(reusableDate)}.`);
           }
         }
 
@@ -2562,11 +2824,11 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
           throw new Error('El beneficio seleccionado pertenece a otra clienta.');
         }
 
-        const todayStr = apt.fecha || new Date().toISOString().split('T')[0];
+        const todayStr = apt.fecha || getBusinessDate();
         if (benefit.fecha_vencimiento && todayStr > benefit.fecha_vencimiento) {
           await client.query('UPDATE client_benefits SET estado = \'vencido\', updated_at = NOW() WHERE id = $1', [benefit.id]);
           await client.query('ROLLBACK');
-          throw new Error(`Este beneficio ha vencido el ${benefit.fecha_vencimiento}.`);
+          throw new Error(`Este beneficio ha vencido el ${isoDateToAR(benefit.fecha_vencimiento)}.`);
         }
 
         // Applicable services check
@@ -2684,31 +2946,41 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
 
   // Fallback in-memory check for double booking in development
   if (apt.profesionalId) {
-    const existingOverlap = memoryDb.appointments.find(a =>
-      a.profesionalId === apt.profesionalId &&
-      a.fecha === apt.fecha &&
-      a.estado !== 'cancelado' &&
-      !(a.horaFin <= apt.horaInicio || a.horaInicio >= apt.horaFin)
-    );
+    const studioConfig = memoryDb.config || defaultStudioConfig;
+    const bufferMinutos = Number(studioConfig.bufferMinutos || 0);
+    const startM = timeToMinutes(apt.horaInicio);
+    const endM = timeToMinutes(apt.horaFin) || (startM + (apt.duracionMinutos || 60));
+    const totalOccupiedEndM = endM + bufferMinutos;
+
+    const existingOverlap = memoryDb.appointments.find(a => {
+      if (a.profesionalId !== apt.profesionalId || a.fecha !== apt.fecha || a.estado === 'cancelado' || a.id === apt.id) {
+        return false;
+      }
+      const aptStart = timeToMinutes(a.horaInicio);
+      const aptEnd = timeToMinutes(a.horaFin) + bufferMinutos;
+      return Math.max(startM, aptStart) < Math.min(totalOccupiedEndM, aptEnd);
+    });
+
     if (existingOverlap) {
       throw new Error('El horario seleccionado ya ha sido reservado por otra solicitud simultánea. Por favor elegí otro horario.');
     }
   }
 
   // Fallback memory discount validation & consumption
-  if (apt.descuentoCodigo || apt.descuentoTipo === 'promocion') {
-    const promoCode = (apt.descuentoCodigo || '').trim().toUpperCase();
+  const cleanMemPromoCode = (apt.descuentoCodigo || '').trim().toUpperCase();
+  if (cleanMemPromoCode.length > 0 || apt.descuentoTipo === 'promocion') {
+    const promoCode = cleanMemPromoCode;
     const promo = memoryDb.promotions?.find(p => p.codigo.toUpperCase() === promoCode);
     if (!promo || !promo.activo) {
       throw new Error(`Código promocional "${promoCode}" inválido o inactivo.`);
     }
 
-    const todayStr = apt.fecha || new Date().toISOString().split('T')[0];
+    const todayStr = apt.fecha || getBusinessDate();
     if (promo.fechaInicio && todayStr < promo.fechaInicio) {
-      throw new Error(`Esta promoción aún no está vigente (comienza el ${promo.fechaInicio}).`);
+      throw new Error(`Esta promoción aún no está vigente (comienza el ${isoDateToAR(promo.fechaInicio)}).`);
     }
     if (promo.fechaVencimiento && todayStr > promo.fechaVencimiento) {
-      throw new Error(`Esta promoción ha vencido el ${promo.fechaVencimiento}.`);
+      throw new Error(`Esta promoción ha vencido el ${isoDateToAR(promo.fechaVencimiento)}.`);
     }
 
     // Check total usage limit
@@ -2753,7 +3025,7 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
       const daysElapsed = (nowMs - lastDate) / (1000 * 60 * 60 * 24);
       if (daysElapsed < promo.periodoReutilizacionDias) {
         const reusableDate = new Date(lastDate + promo.periodoReutilizacionDias * 86400000);
-        throw new Error(`Ya has utilizado esta promoción. Podrás volver a utilizarla a partir del ${reusableDate.toLocaleDateString('es-AR')}.`);
+        throw new Error(`Ya has utilizado esta promoción. Podrás volver a utilizarla a partir del ${formatDateAR(reusableDate)}.`);
       }
     }
 
@@ -2798,10 +3070,10 @@ export async function createAppointment(apt: Appointment): Promise<Appointment> 
       throw new Error('Beneficio no disponible o inválido.');
     }
 
-    const todayStr = apt.fecha || new Date().toISOString().split('T')[0];
+    const todayStr = apt.fecha || getBusinessDate();
     if (benefit.fechaVencimiento && todayStr > benefit.fechaVencimiento) {
       benefit.estado = 'vencido';
-      throw new Error(`Este beneficio ha vencido el ${benefit.fechaVencimiento}.`);
+      throw new Error(`Este beneficio ha vencido el ${isoDateToAR(benefit.fechaVencimiento)}.`);
     }
 
     const phoneNorm = normalizePhone(apt.telefono);
@@ -3036,20 +3308,146 @@ export async function deleteAppointment(id: string, motivo = 'Cancelado y archiv
 // CRUD OPERATIONS: USERS & AUTHENTICATION
 // ---------------------------------------------------------------------------
 
+export async function createAuditLog(data: {
+  actorId?: string;
+  actorName?: string;
+  targetUserId?: string;
+  evento: string;
+  origen?: string;
+  metadata?: Record<string, any>;
+}): Promise<void> {
+  const id = `audit-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+  const logItem: AuditLog = {
+    id,
+    actorId: data.actorId,
+    actorName: data.actorName,
+    targetUserId: data.targetUserId,
+    evento: data.evento,
+    fecha: now,
+    origen: data.origen || 'sistema',
+    metadata: data.metadata
+  };
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      await pgPool.query(`
+        INSERT INTO audit_logs (id, actor_id, actor_name, target_user_id, evento, fecha, origen, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
+        logItem.id,
+        logItem.actorId || null,
+        logItem.actorName || null,
+        logItem.targetUserId || null,
+        logItem.evento,
+        logItem.fecha,
+        logItem.origen || null,
+        logItem.metadata ? JSON.stringify(logItem.metadata) : null
+      ]);
+    } catch (err) {
+      console.error('Error creating audit log in PostgreSQL:', err);
+    }
+  }
+
+  if (!memoryDb.auditLogs) memoryDb.auditLogs = [];
+  memoryDb.auditLogs.push(logItem);
+  saveLocalFileDb();
+}
+
+export async function isLastActiveSuperadmin(userId: string): Promise<boolean> {
+  const users = await getUsers(false);
+  const activeSuperadmins = users.filter(u => u.rol === 'superadmin' && u.activo);
+  if (activeSuperadmins.length === 1 && activeSuperadmins[0].id === userId) {
+    return true;
+  }
+  return false;
+}
+
+let bootstrapMutex = Promise.resolve();
+
+export async function checkAndExecuteSuperadminBootstrap() {
+  await bootstrapMutex;
+  let releaseMutex = () => {};
+  bootstrapMutex = new Promise((resolve) => { releaseMutex = resolve; });
+
+  try {
+    let superadminCount = 0;
+    if (isPostgresConnected && pgPool) {
+      try {
+        await pgPool.query('BEGIN');
+        await pgPool.query('SELECT pg_advisory_xact_lock(992837465)');
+        const res = await pgPool.query("SELECT COUNT(*) FROM users WHERE rol = 'superadmin'");
+        superadminCount = parseInt(res.rows[0].count, 10);
+        await pgPool.query('COMMIT');
+      } catch (err) {
+        try { await pgPool.query('ROLLBACK'); } catch {}
+        console.error('Error in postgres bootstrap check:', err);
+      }
+    } else {
+      superadminCount = memoryDb.users.filter(u => u.rol === 'superadmin').length;
+    }
+
+    if (superadminCount === 0) {
+      const bUser = process.env.SUPERADMIN_BOOTSTRAP_USERNAME;
+      const bPass = process.env.SUPERADMIN_BOOTSTRAP_PASSWORD;
+      const bName = process.env.SUPERADMIN_BOOTSTRAP_DISPLAY_NAME;
+
+      if (process.env.NODE_ENV === 'production' && (!bUser || !bPass)) {
+        console.warn('⚠️ ADVERTENCIA: No existen superadministradores en la base de datos y faltan SUPERADMIN_BOOTSTRAP_USERNAME / SUPERADMIN_BOOTSTRAP_PASSWORD.');
+      }
+
+      if (bUser && bPass) {
+        const policyCheck = validatePasswordPolicy(bPass);
+        if (!policyCheck.valid) {
+          console.error(`❌ Error: Contraseña de bootstrap no cumple requisitos de política: ${policyCheck.error}`);
+          return;
+        }
+
+        await createUser({
+          username: bUser.trim(),
+          email: `${bUser.trim()}@gwennails.com`,
+          password: bPass,
+          rol: 'superadmin',
+          nombre: bName?.trim() || 'Super Administrador',
+          activo: true,
+          mustChangePassword: false
+        });
+
+        await createAuditLog({
+          evento: 'superadmin_bootstrapped',
+          metadata: { username: bUser.trim() }
+        });
+
+        console.log(`[BOOTSTRAP] Superadministrador inicial "${bUser.trim()}" creado exitosamente.`);
+        console.log(`[BOOTSTRAP AVISO] Retire SUPERADMIN_BOOTSTRAP_USERNAME y SUPERADMIN_BOOTSTRAP_PASSWORD de su configuración de entorno por seguridad.`);
+      }
+    } else {
+      const bUser = process.env.SUPERADMIN_BOOTSTRAP_USERNAME;
+      if (bUser) {
+        console.log(`[BOOTSTRAP] Ya existe al menos un superadministrador registrado (activo o inactivo). Ignorando variables de bootstrap. Si la cuenta está inactiva o bloqueada, utilice "npm run superadmin:recover".`);
+      }
+    }
+  } finally {
+    releaseMutex();
+  }
+}
+
 export async function getUsers(activeOnly = true): Promise<User[]> {
   if (isPostgresConnected && pgPool) {
     try {
       const query = activeOnly
-        ? 'SELECT id, email, rol, profesional_id, activo, nombre, created_at, updated_at FROM users WHERE activo = true ORDER BY created_at ASC'
-        : 'SELECT id, email, rol, profesional_id, activo, nombre, created_at, updated_at FROM users ORDER BY created_at ASC';
+        ? 'SELECT id, username, email, rol, profesional_id, activo, nombre, must_change_password, created_at, updated_at FROM users WHERE activo = true ORDER BY created_at ASC'
+        : 'SELECT id, username, email, rol, profesional_id, activo, nombre, must_change_password, created_at, updated_at FROM users ORDER BY created_at ASC';
       const res = await pgPool.query(query);
       return res.rows.map(row => ({
         id: row.id,
-        email: row.email,
+        username: row.username || undefined,
+        email: row.email || undefined,
         rol: row.rol as UserRole,
         profesionalId: row.profesional_id || undefined,
         activo: Boolean(row.activo),
         nombre: row.nombre || undefined,
+        mustChangePassword: Boolean(row.must_change_password),
         createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
         updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
       }));
@@ -3060,11 +3458,13 @@ export async function getUsers(activeOnly = true): Promise<User[]> {
 
   return (activeOnly ? memoryDb.users.filter(u => u.activo) : memoryDb.users).map(u => ({
     id: u.id,
+    username: u.username,
     email: u.email,
     rol: u.rol,
     profesionalId: u.profesionalId,
     activo: u.activo,
     nombre: u.nombre,
+    mustChangePassword: u.mustChangePassword,
     createdAt: u.createdAt,
     updatedAt: u.updatedAt
   }));
@@ -3078,13 +3478,15 @@ export async function getUserById(id: string): Promise<User | null> {
         const row = res.rows[0];
         return {
           id: row.id,
-          email: row.email,
+          username: row.username || undefined,
+          email: row.email || undefined,
           passwordHash: row.password_hash,
           salt: row.salt,
           rol: row.rol as UserRole,
           profesionalId: row.profesional_id || undefined,
           activo: Boolean(row.activo),
           nombre: row.nombre || undefined,
+          mustChangePassword: Boolean(row.must_change_password),
           createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
           updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
         };
@@ -3098,6 +3500,37 @@ export async function getUserById(id: string): Promise<User | null> {
   return u || null;
 }
 
+export async function getUserByUsername(username: string): Promise<User | null> {
+  const normU = username.trim().toLowerCase();
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query('SELECT * FROM users WHERE LOWER(username) = LOWER($1)', [normU]);
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        return {
+          id: row.id,
+          username: row.username || undefined,
+          email: row.email || undefined,
+          passwordHash: row.password_hash,
+          salt: row.salt,
+          rol: row.rol as UserRole,
+          profesionalId: row.profesional_id || undefined,
+          activo: Boolean(row.activo),
+          nombre: row.nombre || undefined,
+          mustChangePassword: Boolean(row.must_change_password),
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
+        };
+      }
+    } catch (err) {
+      console.error('Error fetching user by username from PostgreSQL:', err);
+    }
+  }
+
+  const u = memoryDb.users.find(user => user.username && user.username.toLowerCase() === normU);
+  return u || null;
+}
+
 export async function getUserByEmail(email: string): Promise<User | null> {
   const normEmail = normalizeEmail(email);
   if (isPostgresConnected && pgPool) {
@@ -3107,13 +3540,15 @@ export async function getUserByEmail(email: string): Promise<User | null> {
         const row = res.rows[0];
         return {
           id: row.id,
-          email: row.email,
+          username: row.username || undefined,
+          email: row.email || undefined,
           passwordHash: row.password_hash,
           salt: row.salt,
           rol: row.rol as UserRole,
           profesionalId: row.profesional_id || undefined,
           activo: Boolean(row.activo),
           nombre: row.nombre || undefined,
+          mustChangePassword: Boolean(row.must_change_password),
           createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
           updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
         };
@@ -3123,25 +3558,35 @@ export async function getUserByEmail(email: string): Promise<User | null> {
     }
   }
 
-  const u = memoryDb.users.find(user => normalizeEmail(user.email) === normEmail);
+  const u = memoryDb.users.find(user => user.email && normalizeEmail(user.email) === normEmail);
   return u || null;
 }
 
 export async function createUser(userData: {
-  email: string;
+  username?: string;
+  email?: string;
   password?: string;
   rol: UserRole;
   profesionalId?: string;
   nombre?: string;
   activo?: boolean;
+  mustChangePassword?: boolean;
 }): Promise<User> {
+  const passToValidate = userData.password || "Password123!";
+  const policy = validatePasswordPolicy(passToValidate);
+  if (!policy.valid) {
+    throw new Error(policy.error);
+  }
+
   const id = crypto.randomUUID();
-  const email = normalizeEmail(userData.email);
-  const { hash, salt } = hashPassword(userData.password || "password123");
+  const username = userData.username ? userData.username.trim() : undefined;
+  const email = userData.email ? normalizeEmail(userData.email) : (username ? normalizeEmail(`${username}@gwennails.local`) : normalizeEmail(`user-${crypto.randomBytes(4).toString('hex')}@gwennails.local`));
+  const { hash, salt } = hashPassword(passToValidate);
   const now = new Date().toISOString();
 
   const user: User = {
     id,
+    username,
     email,
     passwordHash: hash,
     salt,
@@ -3149,6 +3594,7 @@ export async function createUser(userData: {
     profesionalId: userData.profesionalId,
     activo: userData.activo !== false,
     nombre: userData.nombre,
+    mustChangePassword: !!userData.mustChangePassword,
     createdAt: now,
     updatedAt: now
   };
@@ -3156,17 +3602,19 @@ export async function createUser(userData: {
   if (isPostgresConnected && pgPool) {
     try {
       await pgPool.query(`
-        INSERT INTO users (id, email, password_hash, salt, rol, profesional_id, activo, nombre, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+        INSERT INTO users (id, username, email, password_hash, salt, rol, profesional_id, activo, nombre, must_change_password, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
       `, [
         user.id,
-        user.email,
+        user.username || null,
+        user.email || null,
         user.passwordHash,
         user.salt,
         user.rol,
         user.profesionalId || null,
         user.activo,
-        user.nombre || null
+        user.nombre || null,
+        user.mustChangePassword
       ]);
     } catch (err) {
       console.error('Error creating user in PostgreSQL:', err);
@@ -3181,6 +3629,23 @@ export async function createUser(userData: {
 }
 
 export async function updateUser(id: string, updates: Partial<User> & { password?: string }): Promise<User | null> {
+  if (updates.activo === false || (updates.rol && updates.rol !== 'superadmin')) {
+    const currUser = await getUserById(id);
+    if (currUser && currUser.rol === 'superadmin' && currUser.activo) {
+      const isLast = await isLastActiveSuperadmin(id);
+      if (isLast) {
+        throw new Error('No se puede desactivar o degradar el último superadministrador activo del sistema.');
+      }
+    }
+  }
+
+  if (updates.password) {
+    const policy = validatePasswordPolicy(updates.password);
+    if (!policy.valid) {
+      throw new Error(policy.error);
+    }
+  }
+
   const now = new Date().toISOString();
   let hashUpdates: { passwordHash?: string; salt?: string } = {};
 
@@ -3191,30 +3656,30 @@ export async function updateUser(id: string, updates: Partial<User> & { password
 
   if (isPostgresConnected && pgPool) {
     try {
-      const currentRes = await pgPool.query('SELECT * FROM users WHERE id = $1', [id]);
-      if (currentRes.rows.length === 0) return null;
-      const curr = currentRes.rows[0];
-
       await pgPool.query(`
         UPDATE users
-        SET email = COALESCE($2, email),
-            password_hash = COALESCE($3, password_hash),
-            salt = COALESCE($4, salt),
-            rol = COALESCE($5, rol),
-            profesional_id = COALESCE($6, profesional_id),
-            activo = COALESCE($7, activo),
-            nombre = COALESCE($8, nombre),
+        SET username = COALESCE($2, username),
+            email = COALESCE($3, email),
+            password_hash = COALESCE($4, password_hash),
+            salt = COALESCE($5, salt),
+            rol = COALESCE($6, rol),
+            profesional_id = COALESCE($7, profesional_id),
+            activo = COALESCE($8, activo),
+            nombre = COALESCE($9, nombre),
+            must_change_password = COALESCE($10, must_change_password),
             updated_at = NOW()
         WHERE id = $1
       `, [
         id,
+        updates.username !== undefined ? updates.username.trim() : null,
         updates.email ? normalizeEmail(updates.email) : null,
         hashUpdates.passwordHash || null,
         hashUpdates.salt || null,
         updates.rol || null,
         updates.profesionalId !== undefined ? updates.profesionalId : null,
         updates.activo !== undefined ? updates.activo : null,
-        updates.nombre !== undefined ? updates.nombre : null
+        updates.nombre !== undefined ? updates.nombre : null,
+        updates.mustChangePassword !== undefined ? updates.mustChangePassword : null
       ]);
     } catch (err) {
       console.error('Error updating user in PostgreSQL:', err);
@@ -3226,6 +3691,7 @@ export async function updateUser(id: string, updates: Partial<User> & { password
     memoryDb.users[idx] = {
       ...memoryDb.users[idx],
       ...updates,
+      ...(updates.username ? { username: updates.username.trim() } : {}),
       ...hashUpdates,
       updatedAt: now
     };
@@ -3236,6 +3702,11 @@ export async function updateUser(id: string, updates: Partial<User> & { password
 }
 
 export async function deleteUser(id: string): Promise<boolean> {
+  const currUser = await getUserById(id);
+  if (currUser && currUser.rol === 'superadmin') {
+    throw new Error('No se permite la eliminación física de superadministradores. Utilice desactivación lógica si es necesario.');
+  }
+
   if (isPostgresConnected && pgPool) {
     try {
       const res = await pgPool.query('DELETE FROM users WHERE id = $1', [id]);
@@ -3252,23 +3723,254 @@ export async function deleteUser(id: string): Promise<boolean> {
   return true;
 }
 
-export async function authenticateUser(email: string, password: string): Promise<{ success: boolean; user?: User; error?: string }> {
-  const user = await getUserByEmail(email);
-  if (!user || !user.activo) {
-    return { success: false, error: 'Usuario no encontrado o inactivo.' };
+export async function adminResetPassword(targetUserId: string, newPassword: string, actorId?: string, actorName?: string): Promise<User | null> {
+  const policy = validatePasswordPolicy(newPassword);
+  if (!policy.valid) {
+    throw new Error(policy.error);
   }
 
-  if (!user.passwordHash || !user.salt) {
-    return { success: false, error: 'Credenciales inválidas.' };
+  const updated = await updateUser(targetUserId, {
+    password: newPassword,
+    mustChangePassword: true
+  });
+
+  if (updated) {
+    await createAuditLog({
+      actorId,
+      actorName,
+      targetUserId,
+      evento: 'admin_password_reset',
+      metadata: { targetUserId }
+    });
+  }
+
+  return updated;
+}
+
+export async function authenticateUser(identifier: string, password: string): Promise<{ success: boolean; user?: User; error?: string }> {
+  let user = await getUserByUsername(identifier);
+  if (!user) {
+    user = await getUserByEmail(identifier);
+  }
+
+  if (!user || !user.activo || !user.passwordHash || !user.salt) {
+    // Dummy verification for timing attack mitigation
+    verifyPassword(password || '', '00000000000000000000000000000000', '00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000');
+    return { success: false, error: 'Usuario o contraseña incorrectos.' };
   }
 
   const isValid = verifyPassword(password, user.salt, user.passwordHash);
   if (!isValid) {
-    return { success: false, error: 'Contraseña incorrecta.' };
+    return { success: false, error: 'Usuario o contraseña incorrectos.' };
   }
 
   const { passwordHash: _, salt: __, ...safeUser } = user;
   return { success: true, user: safeUser as User };
+}
+
+// ---------------------------------------------------------------------------
+// SESSION OPERATIONS (OPAQUE RANDOM TOKEN SHA-256 SESSIONS)
+// ---------------------------------------------------------------------------
+
+export function generateSessionToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+export function hashSessionToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+export async function createSession(userId: string, durationMs = 24 * 60 * 60 * 1000): Promise<{ session: Session; rawToken: string }> {
+  const rawToken = generateSessionToken();
+  const tokenHash = hashSessionToken(rawToken);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + durationMs).toISOString();
+
+  const session: Session = {
+    id: `sess-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+    tokenHash,
+    userId,
+    createdAt: now.toISOString(),
+    expiresAt,
+    revokedAt: null,
+    lastActivityAt: now.toISOString()
+  };
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      await pgPool.query(`
+        INSERT INTO sessions (id, token_hash, user_id, created_at, expires_at, revoked_at, last_activity_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [
+        session.id,
+        session.tokenHash,
+        session.userId,
+        session.createdAt,
+        session.expiresAt,
+        session.revokedAt,
+        session.lastActivityAt
+      ]);
+    } catch (err) {
+      console.error('Error inserting session in PostgreSQL:', err);
+    }
+  }
+
+  memoryDb.sessions.push(session);
+  saveLocalFileDb();
+
+  return { session, rawToken };
+}
+
+export async function validateSessionToken(rawToken: string): Promise<{ valid: boolean; user?: SafeUser; session?: Session; error?: string }> {
+  if (!rawToken || typeof rawToken !== 'string') {
+    return { valid: false, error: 'Token no provisto' };
+  }
+
+  const tokenHash = hashSessionToken(rawToken);
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query(`
+        SELECT s.id, s.token_hash, s.user_id, s.created_at, s.expires_at, s.revoked_at, s.last_activity_at,
+               u.email, u.username, u.rol, u.profesional_id, u.activo, u.nombre, u.must_change_password,
+               u.created_at as u_created_at, u.updated_at as u_updated_at
+        FROM sessions s
+        JOIN users u ON s.user_id = u.id
+        WHERE s.token_hash = $1
+      `, [tokenHash]);
+
+      if (res.rows.length === 0) {
+        return { valid: false, error: 'Sesión no encontrada' };
+      }
+
+      const row = res.rows[0];
+      const session: Session = {
+        id: row.id,
+        tokenHash: row.token_hash,
+        userId: row.user_id,
+        createdAt: new Date(row.created_at).toISOString(),
+        expiresAt: new Date(row.expires_at).toISOString(),
+        revokedAt: row.revoked_at ? new Date(row.revoked_at).toISOString() : null,
+        lastActivityAt: row.last_activity_at ? new Date(row.last_activity_at).toISOString() : new Date().toISOString()
+      };
+
+      if (session.revokedAt) {
+        return { valid: false, error: 'Sesión revocada' };
+      }
+
+      if (new Date(session.expiresAt).getTime() < Date.now()) {
+        return { valid: false, error: 'Sesión expirada' };
+      }
+
+      if (!row.activo) {
+        return { valid: false, error: 'Usuario inactivo' };
+      }
+
+      const user: SafeUser = {
+        id: row.user_id,
+        email: row.email,
+        username: row.username || undefined,
+        rol: row.rol,
+        profesionalId: row.profesional_id || undefined,
+        activo: row.activo,
+        nombre: row.nombre || undefined,
+        mustChangePassword: row.must_change_password || false,
+        createdAt: new Date(row.u_created_at).toISOString(),
+        updatedAt: new Date(row.u_updated_at).toISOString()
+      };
+
+      pgPool.query('UPDATE sessions SET last_activity_at = NOW() WHERE id = $1', [session.id]).catch(() => {});
+
+      return { valid: true, user, session };
+    } catch (err) {
+      console.error('Error validating session in PostgreSQL:', err);
+    }
+  }
+
+  const session = memoryDb.sessions.find(s => s.tokenHash === tokenHash);
+  if (!session) {
+    return { valid: false, error: 'Sesión no encontrada' };
+  }
+
+  if (session.revokedAt) {
+    return { valid: false, error: 'Sesión revocada' };
+  }
+
+  if (new Date(session.expiresAt).getTime() < Date.now()) {
+    return { valid: false, error: 'Sesión expirada' };
+  }
+
+  const userRecord = memoryDb.users.find(u => u.id === session.userId);
+  if (!userRecord || !userRecord.activo) {
+    return { valid: false, error: 'Usuario inactivo o no encontrado' };
+  }
+
+  session.lastActivityAt = new Date().toISOString();
+  saveLocalFileDb();
+
+  const { passwordHash: _, salt: __, ...safeUser } = userRecord;
+  return { valid: true, user: safeUser as SafeUser, session };
+}
+
+export async function revokeSessionByToken(rawToken: string): Promise<boolean> {
+  if (!rawToken || typeof rawToken !== 'string') return false;
+  const tokenHash = hashSessionToken(rawToken);
+  const now = new Date().toISOString();
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query('UPDATE sessions SET revoked_at = NOW() WHERE token_hash = $1', [tokenHash]);
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('Error revoking session in PostgreSQL:', err);
+    }
+  }
+
+  const session = memoryDb.sessions.find(s => s.tokenHash === tokenHash);
+  if (session) {
+    session.revokedAt = now;
+    saveLocalFileDb();
+    return true;
+  }
+  return false;
+}
+
+export async function revokeSessionById(sessionId: string): Promise<boolean> {
+  const now = new Date().toISOString();
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query('UPDATE sessions SET revoked_at = NOW() WHERE id = $1', [sessionId]);
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('Error revoking session by ID in PostgreSQL:', err);
+    }
+  }
+
+  const session = memoryDb.sessions.find(s => s.id === sessionId);
+  if (session) {
+    session.revokedAt = now;
+    saveLocalFileDb();
+    return true;
+  }
+  return false;
+}
+
+export async function revokeAllUserSessions(userId: string): Promise<void> {
+  const now = new Date().toISOString();
+  if (isPostgresConnected && pgPool) {
+    try {
+      await pgPool.query('UPDATE sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [userId]);
+    } catch (err) {
+      console.error('Error revoking all user sessions in PostgreSQL:', err);
+    }
+  }
+
+  for (const s of memoryDb.sessions) {
+    if (s.userId === userId && !s.revokedAt) {
+      s.revokedAt = now;
+    }
+  }
+  saveLocalFileDb();
 }
 
 // ---------------------------------------------------------------------------
@@ -3625,7 +4327,7 @@ export async function getScheduleForDate(
   profesionalId?: string,
   fecha?: string
 ): Promise<ScheduleConfig | null> {
-  const targetDate = fecha || new Date().toISOString().split('T')[0];
+  const targetDate = fecha || getBusinessDate();
 
   if (isPostgresConnected && pgPool) {
     try {
@@ -4012,7 +4714,7 @@ export async function isNotificationAlreadySent(idempotencyKey: string, channel:
   if (isPostgresConnected && pgPool) {
     try {
       const res = await pgPool.query(
-        `SELECT id FROM notification_logs WHERE idempotency_key = $1 AND channel = $2 AND status = 'sent' LIMIT 1`,
+        `SELECT id FROM notification_logs WHERE idempotency_key = $1 AND channel = $2 AND status IN ('sent', 'omitido_sin_email', 'skipped') LIMIT 1`,
         [cleanKey, channel]
       );
       if (res.rows.length > 0) return true;
@@ -4022,14 +4724,97 @@ export async function isNotificationAlreadySent(idempotencyKey: string, channel:
   }
 
   const logs = memoryDb.notificationLogs || [];
-  return logs.some(l => l.idempotencyKey === cleanKey && l.channel === channel && l.status === 'sent');
+  return logs.some(l => l.idempotencyKey === cleanKey && l.channel === channel && ['sent', 'omitido_sin_email', 'skipped'].includes(l.status));
+}
+
+export async function acquireNotificationLock(idempotencyKey: string, channel: string, leaseSeconds = 60): Promise<NotificationLog | null> {
+  const cleanKey = (idempotencyKey || '').trim();
+  if (!cleanKey) return null;
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query(`
+        UPDATE notification_logs
+        SET
+          status = 'processing',
+          processing_started_at = NOW(),
+          lease_expires_at = NOW() + INTERVAL '1 second' * $3,
+          attempt_count = attempt_count + 1,
+          updated_at = NOW()
+        WHERE idempotency_key = $1 AND channel = $2
+          AND attempt_count < COALESCE(max_attempts, 3)
+          AND (
+            (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
+            OR (status = 'failed' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
+            OR (status = 'processing' AND lease_expires_at < NOW())
+          )
+        RETURNING *;
+      `, [cleanKey, channel, leaseSeconds]);
+
+      if (res.rows.length === 0) return null;
+      const row = res.rows[0];
+      return {
+        id: row.id,
+        appointmentId: row.appointment_id || undefined,
+        channel: row.channel,
+        recipient: row.recipient || '',
+        notificationType: row.notification_type,
+        status: row.status,
+        subject: row.subject || undefined,
+        message: row.message || undefined,
+        idempotencyKey: row.idempotency_key || undefined,
+        error: row.error || undefined,
+        sentAt: row.sent_at ? new Date(row.sent_at).toISOString() : undefined,
+        processingStartedAt: row.processing_started_at ? new Date(row.processing_started_at).toISOString() : undefined,
+        leaseExpiresAt: row.lease_expires_at ? new Date(row.lease_expires_at).toISOString() : undefined,
+        attemptCount: row.attempt_count || 1,
+        maxAttempts: row.max_attempts ?? 3,
+        nextAttemptAt: row.next_attempt_at ? new Date(row.next_attempt_at).toISOString() : undefined,
+        providerMessageId: row.provider_message_id || undefined,
+        metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {})
+      };
+    } catch (err) {
+      console.error('Error acquiring notification lock in PostgreSQL:', err);
+      throw err;
+    }
+  }
+
+  // memoryDb implementation
+  if (!memoryDb.notificationLogs) memoryDb.notificationLogs = [];
+  const now = new Date();
+  const log = memoryDb.notificationLogs.find(l => l.idempotencyKey === cleanKey && l.channel === channel);
+  if (!log) return null;
+
+  const maxAttempts = log.maxAttempts ?? 3;
+  const currentAttempts = log.attemptCount ?? 0;
+
+  if (currentAttempts >= maxAttempts) {
+    return null;
+  }
+
+  const isEligible = 
+    (log.status === 'pending' && (!log.nextAttemptAt || new Date(log.nextAttemptAt) <= now)) || 
+    (log.status === 'failed' && (!log.nextAttemptAt || new Date(log.nextAttemptAt) <= now)) || 
+    (log.status === 'processing' && log.leaseExpiresAt && new Date(log.leaseExpiresAt) < now);
+
+  if (!isEligible) return null;
+
+  log.status = 'processing';
+  log.processingStartedAt = now.toISOString();
+  log.leaseExpiresAt = new Date(now.getTime() + leaseSeconds * 1000).toISOString();
+  log.attemptCount = currentAttempts + 1;
+  log.maxAttempts = maxAttempts;
+  saveLocalFileDb();
+  return { ...log };
 }
 
 export async function createNotificationLog(log: NotificationLog): Promise<NotificationLog> {
-  const now = log.sentAt || new Date().toISOString();
+  const isFinalSent = log.status === 'sent' || log.status === 'omitido_sin_email';
+  const sentAt = log.sentAt || (isFinalSent ? new Date().toISOString() : undefined);
   const entry: NotificationLog = {
     ...log,
-    sentAt: now
+    sentAt: sentAt || undefined,
+    maxAttempts: log.maxAttempts ?? 3
   };
 
   if (isPostgresConnected && pgPool) {
@@ -4037,13 +4822,23 @@ export async function createNotificationLog(log: NotificationLog): Promise<Notif
       await pgPool.query(`
         INSERT INTO notification_logs (
           id, appointment_id, channel, recipient, notification_type, status,
-          subject, message, idempotency_key, error, sent_at, metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          subject, message, idempotency_key, error, sent_at,
+          processing_started_at, lease_expires_at, attempt_count, max_attempts, next_attempt_at, provider_message_id, updated_at, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         ON CONFLICT (idempotency_key) DO UPDATE SET
-          status = $6,
-          sent_at = $11,
-          error = $10,
-          metadata = $12
+          status = CASE WHEN EXCLUDED.status = 'pending' THEN notification_logs.status ELSE EXCLUDED.status END,
+          sent_at = COALESCE(EXCLUDED.sent_at, notification_logs.sent_at),
+          error = CASE WHEN EXCLUDED.status = 'pending' THEN notification_logs.error ELSE EXCLUDED.error END,
+          subject = COALESCE(EXCLUDED.subject, notification_logs.subject),
+          message = COALESCE(EXCLUDED.message, notification_logs.message),
+          processing_started_at = COALESCE(EXCLUDED.processing_started_at, notification_logs.processing_started_at),
+          lease_expires_at = COALESCE(EXCLUDED.lease_expires_at, notification_logs.lease_expires_at),
+          attempt_count = GREATEST(EXCLUDED.attempt_count, notification_logs.attempt_count),
+          max_attempts = COALESCE(EXCLUDED.max_attempts, notification_logs.max_attempts),
+          next_attempt_at = CASE WHEN EXCLUDED.status = 'pending' THEN notification_logs.next_attempt_at ELSE EXCLUDED.next_attempt_at END,
+          provider_message_id = COALESCE(EXCLUDED.provider_message_id, notification_logs.provider_message_id),
+          updated_at = NOW(),
+          metadata = COALESCE(EXCLUDED.metadata, notification_logs.metadata)
       `, [
         entry.id,
         entry.appointmentId || null,
@@ -4055,11 +4850,19 @@ export async function createNotificationLog(log: NotificationLog): Promise<Notif
         entry.message || null,
         entry.idempotencyKey || null,
         entry.error || null,
-        now,
+        entry.sentAt || null,
+        entry.processingStartedAt || null,
+        entry.leaseExpiresAt || null,
+        entry.attemptCount || 0,
+        entry.maxAttempts || 3,
+        entry.nextAttemptAt || null,
+        entry.providerMessageId || null,
+        new Date().toISOString(),
         JSON.stringify(entry.metadata || {})
       ]);
     } catch (err) {
       console.error('Error persisting notification log to PostgreSQL:', err);
+      throw err;
     }
   }
 
@@ -4068,9 +4871,22 @@ export async function createNotificationLog(log: NotificationLog): Promise<Notif
     ? memoryDb.notificationLogs.findIndex(l => l.idempotencyKey === entry.idempotencyKey && l.channel === entry.channel)
     : -1;
   if (existingIdx !== -1) {
-    memoryDb.notificationLogs[existingIdx] = entry;
+    const existing = memoryDb.notificationLogs[existingIdx];
+    if (entry.status === 'pending') {
+      return existing;
+    }
+    memoryDb.notificationLogs[existingIdx] = {
+      ...existing,
+      ...entry,
+      attemptCount: entry.attemptCount ?? existing.attemptCount ?? 0,
+      maxAttempts: entry.maxAttempts ?? existing.maxAttempts ?? 3
+    };
   } else {
-    memoryDb.notificationLogs.unshift(entry);
+    memoryDb.notificationLogs.unshift({
+      ...entry,
+      attemptCount: entry.attemptCount ?? 0,
+      maxAttempts: entry.maxAttempts ?? 3
+    });
   }
   saveLocalFileDb();
 
@@ -4098,7 +4914,7 @@ export async function getNotificationLogs(filter?: {
       }
       const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
       values.push(limit);
-      const res = await pgPool.query(`SELECT * FROM notification_logs ${where} ORDER BY sent_at DESC LIMIT $${values.length}`, values);
+      const res = await pgPool.query(`SELECT * FROM notification_logs ${where} ORDER BY updated_at DESC, id DESC LIMIT $${values.length}`, values);
       return res.rows.map(row => ({
         id: row.id,
         appointmentId: row.appointment_id || undefined,
@@ -4110,7 +4926,13 @@ export async function getNotificationLogs(filter?: {
         message: row.message || undefined,
         idempotencyKey: row.idempotency_key || undefined,
         error: row.error || undefined,
-        sentAt: row.sent_at ? new Date(row.sent_at).toISOString() : new Date().toISOString(),
+        sentAt: row.sent_at ? new Date(row.sent_at).toISOString() : undefined,
+        processingStartedAt: row.processing_started_at ? new Date(row.processing_started_at).toISOString() : undefined,
+        leaseExpiresAt: row.lease_expires_at ? new Date(row.lease_expires_at).toISOString() : undefined,
+        attemptCount: row.attempt_count || 0,
+        maxAttempts: row.max_attempts ?? 3,
+        nextAttemptAt: row.next_attempt_at ? new Date(row.next_attempt_at).toISOString() : undefined,
+        providerMessageId: row.provider_message_id || undefined,
         metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {})
       }));
     } catch (err) {
@@ -4128,6 +4950,8 @@ export async function getNotificationLogs(filter?: {
 // ATOMIC TRANSACTION: AVAILABILITY EXCEPTION & CANCELLATIONS
 // ---------------------------------------------------------------------------
 
+let memoryDbMutex = Promise.resolve();
+
 export async function applyAvailabilityExceptionWithCancellations(payload: {
   alcance: ScheduleScope;
   profesionalId?: string;
@@ -4139,20 +4963,52 @@ export async function applyAvailabilityExceptionWithCancellations(payload: {
   conflictAppointmentIds?: string[];
   cancelMotivo?: string;
   canceladoPor?: string;
-}): Promise<{
-  exceptions: AvailabilityException[];
-  cancelledAppointments: Appointment[];
-}> {
+  adjuntarBeneficio?: boolean;
+  benefitTemplateId?: string;
+  benefitAppointmentIds?: string[];
+  operationId?: string;
+}): Promise<ApplyAvailabilityExceptionResult> {
   const cancelMotivo = (payload.cancelMotivo || 'Cancelado por parte del salón, por excepción de horarios').trim();
   const canceladoPor = (payload.canceladoPor || 'Sistema / Excepción de horarios').trim();
   const now = new Date().toISOString();
+  const businessToday = getBusinessDate();
+
+  const conflictIds = (payload.conflictAppointmentIds || []).filter(Boolean);
+  const adjuntarBeneficio = Boolean(payload.adjuntarBeneficio);
+
+  let benefitAppointmentIds: string[] = [];
+
+  // Early validation of benefit selection
+  if (adjuntarBeneficio) {
+    if (!payload.benefitTemplateId || typeof payload.benefitTemplateId !== 'string' || !payload.benefitTemplateId.trim()) {
+      throw new Error('Debe especificar una plantilla de beneficio válida cuando adjuntarBeneficio está activo.');
+    }
+
+    if (!Array.isArray(payload.benefitAppointmentIds) || payload.benefitAppointmentIds.length === 0) {
+      throw new Error('Debe seleccionar al menos un turno para otorgar la compensación o desactivar el beneficio.');
+    }
+
+    const uniqueIds = new Set(payload.benefitAppointmentIds.map(id => String(id).trim()));
+    if (uniqueIds.size !== payload.benefitAppointmentIds.length) {
+      throw new Error('No se permiten turnos duplicados en la selección de beneficios.');
+    }
+
+    benefitAppointmentIds = Array.from(uniqueIds);
+
+    const conflictSet = new Set(conflictIds);
+    for (const bId of benefitAppointmentIds) {
+      if (!conflictSet.has(bId)) {
+        throw new Error('Uno o más turnos seleccionados para recibir beneficio no pertenecen al lote de turnos afectados.');
+      }
+    }
+  }
 
   const targetProfIds: (string | undefined)[] = payload.alcance === 'profesional'
     ? (payload.profesionalIds && payload.profesionalIds.length > 0 ? payload.profesionalIds : [payload.profesionalId])
     : [undefined];
 
   const exceptionsToCreate: AvailabilityException[] = targetProfIds.map(pId => ({
-    id: `exc-${payload.alcance}-${pId || 'local'}-${payload.fecha}-${Math.floor(Math.random() * 10000)}`,
+    id: `exc-${payload.alcance}-${pId || 'local'}-${payload.fecha}-${payload.tipo}`,
     alcance: payload.alcance,
     profesionalId: pId,
     fecha: payload.fecha,
@@ -4163,40 +5019,92 @@ export async function applyAvailabilityExceptionWithCancellations(payload: {
     updatedAt: now
   }));
 
-  const conflictIds = (payload.conflictAppointmentIds || []).filter(Boolean);
-  let updatedAppointments: Appointment[] = [];
-
-  // Database Transaction execution (PostgreSQL)
+  // =========================================================================
+  // POSTGRESQL TRANSACTION EXECUTION
+  // =========================================================================
   if (isPostgresConnected && pgPool) {
     const client = await pgPool.connect();
     try {
       await client.query('BEGIN');
 
-      // 1. Cancel conflicting appointments in atomic transaction
-      if (conflictIds.length > 0) {
+      // 1. Authoritative Re-validation & Row Locking of Benefit Template (FOR SHARE)
+      let lockedTemplate: BenefitTemplate | null = null;
+      let expirationDate: string | null = null;
+      if (adjuntarBeneficio) {
+        const tplRes = await client.query(
+          'SELECT * FROM benefit_templates WHERE id = $1 FOR SHARE',
+          [payload.benefitTemplateId!.trim()]
+        );
+        if (tplRes.rows.length === 0) {
+          throw new Error('La plantilla de beneficio seleccionada no existe.');
+        }
+        lockedTemplate = mapBenefitTemplateRow(tplRes.rows[0]);
+        if (!lockedTemplate.activo) {
+          throw new Error('La plantilla de beneficio seleccionada está inactiva y no puede ser otorgada.');
+        }
+        if (!['porcentaje', 'monto_fijo'].includes(lockedTemplate.tipoDescuento)) {
+          throw new Error('El tipo de descuento de la plantilla de beneficio no es válido.');
+        }
+        if (typeof lockedTemplate.valorDescuento !== 'number' || isNaN(lockedTemplate.valorDescuento) || lockedTemplate.valorDescuento <= 0) {
+          throw new Error('El valor de descuento de la plantilla no es válido.');
+        }
+        if (lockedTemplate.tipoDescuento === 'porcentaje' && lockedTemplate.valorDescuento > 100) {
+          throw new Error('El porcentaje de descuento de la plantilla no puede superar el 100%.');
+        }
+        if (typeof lockedTemplate.vigenciaDias !== 'number' || !Number.isInteger(lockedTemplate.vigenciaDias) || lockedTemplate.vigenciaDias < 1 || lockedTemplate.vigenciaDias > 730) {
+          throw new Error('La vigencia en días de la plantilla debe ser un número entero entre 1 y 730.');
+        }
+        expirationDate = addDaysToIsoDate(businessToday, lockedTemplate.vigenciaDias);
+      }
+
+      // 2. Lock affected appointments in deterministic ID order (FOR UPDATE)
+      let lockedAppointments: Appointment[] = [];
+      const sortedConflictIds = [...conflictIds].sort();
+      if (sortedConflictIds.length > 0) {
+        const aptRes = await client.query(
+          'SELECT * FROM appointments WHERE id = ANY($1) ORDER BY id ASC FOR UPDATE',
+          [sortedConflictIds]
+        );
+        lockedAppointments = aptRes.rows.map(mapAppointmentRow);
+
+        const foundIds = new Set(lockedAppointments.map(a => a.id));
+        for (const cid of sortedConflictIds) {
+          if (!foundIds.has(cid)) {
+            throw new Error(`El turno ${cid} no existe o no fue encontrado.`);
+          }
+        }
+
+        if (adjuntarBeneficio && benefitAppointmentIds.length > 0) {
+          for (const bId of benefitAppointmentIds) {
+            if (!foundIds.has(bId)) {
+              throw new Error('Uno o más turnos seleccionados para recibir beneficio no pertenecen al lote de turnos afectados.');
+            }
+          }
+        }
+
+        // 3. Atomically update appointments status
         await client.query(`
           UPDATE appointments
           SET estado = 'cancelado',
-              motivo_cancelacion = $1,
-              cancelado_en = $2,
-              cancelado_origen = 'excepcion_disponibilidad',
-              cancelado_por = $3,
+              motivo_cancelacion = COALESCE(motivo_cancelacion, $1),
+              cancelado_en = COALESCE(cancelado_en, $2::timestamptz),
+              cancelado_origen = COALESCE(cancelado_origen, 'excepcion_disponibilidad'),
+              cancelado_por = COALESCE(cancelado_por, $3),
               updated_at = NOW()
           WHERE id = ANY($4)
-        `, [cancelMotivo, now, canceladoPor, conflictIds]);
-
-        const updatedRes = await client.query(`
-          SELECT * FROM appointments WHERE id = ANY($1)
-        `, [conflictIds]);
-
-        updatedAppointments = updatedRes.rows.map(mapAppointmentRow);
+        `, [cancelMotivo, now, canceladoPor, sortedConflictIds]);
       }
 
-      // 2. Insert availability exceptions in same transaction
+      // 4. Idempotently insert availability exceptions
       for (const exc of exceptionsToCreate) {
         await client.query(`
           INSERT INTO availability_exceptions (id, alcance, profesional_id, fecha, tipo, intervalos, motivo, created_at, updated_at)
           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+          ON CONFLICT (id) DO UPDATE SET
+            tipo = EXCLUDED.tipo,
+            intervalos = EXCLUDED.intervalos,
+            motivo = EXCLUDED.motivo,
+            updated_at = NOW()
         `, [
           exc.id,
           exc.alcance,
@@ -4208,8 +5116,228 @@ export async function applyAvailabilityExceptionWithCancellations(payload: {
         ]);
       }
 
-      // Confirm / commit the transaction
+      // 5. Issue benefits with Savepoints and explicit 23505 handling
+      const issuedBenefits: ClientBenefit[] = [];
+      const appointmentResults: AppointmentCancellationResult[] = [];
+
+      for (let i = 0; i < lockedAppointments.length; i++) {
+        const apt = lockedAppointments[i];
+        const wasAlreadyCancelled = apt.estado === 'cancelado';
+        const cancelledInThisExecution = !wasAlreadyCancelled;
+
+        let aptBenefit: ClientBenefit | null = null;
+        let benefitCreatedInThisExecution = false;
+
+        if (adjuntarBeneficio && lockedTemplate && benefitAppointmentIds.includes(apt.id)) {
+          // Check if benefit already exists
+          const checkRes = await client.query(
+            'SELECT * FROM client_benefits WHERE turno_origen_id = $1 LIMIT 1',
+            [apt.id]
+          );
+
+          if (checkRes.rows.length > 0) {
+            aptBenefit = mapClientBenefitRow(checkRes.rows[0]);
+            issuedBenefits.push(aptBenefit);
+            benefitCreatedInThisExecution = false;
+          } else {
+            const savepointName = `sp_ben_${i}_${Date.now() % 100000}`;
+            await client.query(`SAVEPOINT ${savepointName}`);
+            try {
+              const benefitId = `ben-${Date.now()}-${Math.floor(Math.random() * 10000)}-${i}`;
+              const cliId = apt.clienteId || `cli-${apt.telefono}`;
+              const cliNombre = `${apt.nombre} ${apt.apellido}`.trim();
+              const cliTel = apt.telefono;
+              const cliEmail = apt.email || null;
+              const titulo = lockedTemplate.nombrePublico;
+              const descripcion = lockedTemplate.descripcionPublica || null;
+              const tipoDesc = lockedTemplate.tipoDescuento;
+              const valDesc = lockedTemplate.valorDescuento;
+              const servAplicables = JSON.stringify(lockedTemplate.serviciosAplicables || ['todos']);
+              const montoMin = lockedTemplate.montoMinimo != null ? lockedTemplate.montoMinimo : null;
+              const origen = 'cancelacion_excepcion';
+              const origenDetalle = `Turno ${apt.codigo} cancelado por excepción de disponibilidad`;
+              const otorgadoPor = canceladoPor || 'Sistema / Excepción de horarios';
+
+              await client.query(`
+                INSERT INTO client_benefits (
+                  id, cliente_id, cliente_nombre, cliente_telefono, cliente_email,
+                  template_id, titulo, descripcion, tipo_descuento, valor_descuento,
+                  origen, origen_detalle, fecha_emision, fecha_vencimiento,
+                  estado, turno_origen_id, turno_origen_codigo,
+                  servicios_aplicables, monto_minimo, otorgado_por,
+                  created_at, updated_at
+                ) VALUES (
+                  $1, $2, $3, $4, $5,
+                  $6, $7, $8, $9, $10,
+                  $11, $12, $13, $14,
+                  $15, $16, $17,
+                  $18, $19, $20,
+                  NOW(), NOW()
+                )
+              `, [
+                benefitId, cliId, cliNombre || null, cliTel || null, cliEmail,
+                lockedTemplate.id, titulo, descripcion, tipoDesc, valDesc,
+                origen, origenDetalle, businessToday, expirationDate,
+                'disponible', apt.id, apt.codigo,
+                servAplicables, montoMin, otorgadoPor
+              ]);
+
+              await client.query(`RELEASE SAVEPOINT ${savepointName}`);
+
+              aptBenefit = {
+                id: benefitId,
+                clienteId: cliId,
+                clienteNombre: cliNombre,
+                clienteTelefono: cliTel,
+                clienteEmail: cliEmail || undefined,
+                templateId: lockedTemplate.id,
+                titulo,
+                descripcion: descripcion || undefined,
+                tipoDescuento: tipoDesc,
+                valorDescuento: valDesc,
+                origen: 'cancelacion_excepcion',
+                origenDetalle,
+                fechaEmision: businessToday,
+                fechaVencimiento: expirationDate,
+                estado: 'disponible',
+                turnoOrigenId: apt.id,
+                turnoOrigenCodigo: apt.codigo,
+                serviciosAplicables: lockedTemplate.serviciosAplicables || ['todos'],
+                montoMinimo: montoMin,
+                otorgadoPor,
+                createdAt: now,
+                updatedAt: now
+              };
+              issuedBenefits.push(aptBenefit);
+              benefitCreatedInThisExecution = true;
+            } catch (insErr: any) {
+              if (insErr.code === '23505' || insErr.message?.includes('idx_client_benefits_turno_origen')) {
+                await client.query(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+                const retryRes = await client.query(
+                  'SELECT * FROM client_benefits WHERE turno_origen_id = $1 LIMIT 1',
+                  [apt.id]
+                );
+                if (retryRes.rows.length > 0) {
+                  aptBenefit = mapClientBenefitRow(retryRes.rows[0]);
+                  issuedBenefits.push(aptBenefit);
+                  benefitCreatedInThisExecution = false;
+                } else {
+                  throw insErr;
+                }
+              } else {
+                await client.query(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+                throw insErr;
+              }
+            }
+          }
+        }
+
+        // 6. Notification event identity and transactional registration
+        const idempotencyKey = `exc-cancel-${apt.id}-${payload.fecha}`;
+        const logCheck = await client.query(
+          'SELECT id, status FROM notification_logs WHERE idempotency_key = $1 AND channel = $2 LIMIT 1',
+          [idempotencyKey, 'email']
+        );
+
+        let shouldSendNotification = false;
+        let notificationStatus: 'pending' | 'omitido_sin_email' | 'already_sent' | 'skipped' = 'pending';
+        const hasValidEmail = Boolean(apt.email && apt.email.trim());
+
+        if (logCheck.rows.length > 0) {
+          const existingStatus = logCheck.rows[0].status;
+          if (existingStatus === 'sent') {
+            shouldSendNotification = false;
+            notificationStatus = 'already_sent';
+          } else if (existingStatus === 'omitido_sin_email') {
+            shouldSendNotification = false;
+            notificationStatus = 'omitido_sin_email';
+          } else if (existingStatus === 'pending') {
+            shouldSendNotification = hasValidEmail;
+            notificationStatus = hasValidEmail ? 'pending' : 'omitido_sin_email';
+          } else {
+            // failed: allow retry
+            shouldSendNotification = hasValidEmail;
+            notificationStatus = hasValidEmail ? 'pending' : 'omitido_sin_email';
+          }
+        } else {
+          if (!hasValidEmail) {
+            shouldSendNotification = false;
+            notificationStatus = 'omitido_sin_email';
+            const logId = `notif-email-${Date.now()}-${i}`;
+            await client.query(`
+              INSERT INTO notification_logs (
+                id, appointment_id, channel, recipient, notification_type, status,
+                subject, message, idempotency_key, error, sent_at, metadata
+              ) VALUES ($1, $2, 'email', 'sin_email', 'appointment_cancellation', 'omitido_sin_email',
+                NULL, NULL, $3, 'no enviado por falta de email', NOW(), $4)
+              ON CONFLICT (idempotency_key) DO NOTHING
+            `, [
+              logId,
+              apt.id,
+              idempotencyKey,
+              JSON.stringify({
+                codigo: apt.codigo,
+                fecha: apt.fecha,
+                servicioNombre: apt.servicioNombre,
+                motivoCancelacion: cancelMotivo
+              })
+            ]);
+          } else {
+            shouldSendNotification = true;
+            notificationStatus = 'pending';
+            const logId = `notif-email-${Date.now()}-${i}`;
+            await client.query(`
+              INSERT INTO notification_logs (
+                id, appointment_id, channel, recipient, notification_type, status,
+                subject, message, idempotency_key, error, sent_at, metadata
+              ) VALUES ($1, $2, 'email', $3, 'appointment_cancellation', 'pending',
+                NULL, NULL, $4, NULL, NOW(), $5)
+              ON CONFLICT (idempotency_key) DO NOTHING
+            `, [
+              logId,
+              apt.id,
+              apt.email!.trim(),
+              idempotencyKey,
+              JSON.stringify({
+                codigo: apt.codigo,
+                fecha: apt.fecha,
+                servicioNombre: apt.servicioNombre,
+                motivoCancelacion: cancelMotivo
+              })
+            ]);
+          }
+        }
+
+        appointmentResults.push({
+          appointment: {
+            ...apt,
+            estado: 'cancelado',
+            motivoCancelacion: cancelMotivo,
+            canceladoEn: now,
+            canceladoOrigen: 'excepcion_disponibilidad',
+            canceladoPor
+          },
+          wasAlreadyCancelled,
+          cancelledInThisExecution,
+          benefit: aptBenefit,
+          benefitCreatedInThisExecution,
+          shouldSendNotification,
+          notificationStatus
+        });
+      }
+
       await client.query('COMMIT');
+
+      // Re-fetch updated appointments
+      const finalAppointmentsRes = await client.query('SELECT * FROM appointments WHERE id = ANY($1)', [sortedConflictIds]);
+      const finalAppointments = finalAppointmentsRes.rows.map(mapAppointmentRow);
+
+      return {
+        exceptions: exceptionsToCreate,
+        cancelledAppointments: finalAppointments,
+        issuedBenefits,
+        appointmentResults
+      };
     } catch (txErr) {
       await client.query('ROLLBACK');
       console.error('Error executing availability exception transaction in PostgreSQL:', txErr);
@@ -4219,35 +5347,234 @@ export async function applyAvailabilityExceptionWithCancellations(payload: {
     }
   }
 
-  // Synchronize memoryDb
-  if (conflictIds.length > 0) {
-    const memoryUpdated: Appointment[] = [];
-    for (const apt of memoryDb.appointments) {
-      if (conflictIds.includes(apt.id)) {
-        apt.estado = 'cancelado';
-        apt.motivoCancelacion = cancelMotivo;
-        apt.canceladoEn = now;
-        apt.canceladoOrigen = 'excepcion_disponibilidad';
-        apt.canceladoPor = canceladoPor;
-        apt.updatedAt = now;
-        memoryUpdated.push(apt);
+  // =========================================================================
+  // MEMORY DB / JSON FALLBACK (STRICT ATOMICITY WITH MUTEX & DRAFT ROLLBACK)
+  // =========================================================================
+  return new Promise<ApplyAvailabilityExceptionResult>((resolve, reject) => {
+    memoryDbMutex = memoryDbMutex.then(async () => {
+      try {
+        // 1. Deep clone entire collections to ensure all-or-nothing rollback
+        const draftAppointments: Appointment[] = JSON.parse(JSON.stringify(memoryDb.appointments || []));
+        const draftExceptions: AvailabilityException[] = JSON.parse(JSON.stringify(memoryDb.availabilityExceptions || []));
+        const draftBenefits: ClientBenefit[] = JSON.parse(JSON.stringify(memoryDb.clientBenefits || []));
+        const draftNotificationLogs: NotificationLog[] = JSON.parse(JSON.stringify(memoryDb.notificationLogs || []));
+
+        // 2. Validate template
+        let lockedTemplate: BenefitTemplate | null = null;
+        let expirationDate: string | null = null;
+        if (adjuntarBeneficio) {
+          const tpl = (memoryDb.benefitTemplates || []).find(t => t.id === payload.benefitTemplateId?.trim());
+          if (!tpl) throw new Error('La plantilla de beneficio seleccionada no existe.');
+          if (!tpl.activo) throw new Error('La plantilla de beneficio seleccionada está inactiva y no puede ser otorgada.');
+          if (!['porcentaje', 'monto_fijo'].includes(tpl.tipoDescuento)) throw new Error('El tipo de descuento de la plantilla de beneficio no es válido.');
+          if (typeof tpl.valorDescuento !== 'number' || isNaN(tpl.valorDescuento) || tpl.valorDescuento <= 0) throw new Error('El valor de descuento de la plantilla no es válido.');
+          if (tpl.tipoDescuento === 'porcentaje' && tpl.valorDescuento > 100) throw new Error('El porcentaje de descuento de la plantilla no puede superar el 100%.');
+          if (typeof tpl.vigenciaDias !== 'number' || !Number.isInteger(tpl.vigenciaDias) || tpl.vigenciaDias < 1 || tpl.vigenciaDias > 730) {
+            throw new Error('La vigencia en días de la plantilla debe ser un número entero entre 1 y 730.');
+          }
+          lockedTemplate = tpl;
+          expirationDate = addDaysToIsoDate(businessToday, lockedTemplate.vigenciaDias);
+        }
+
+        // 3. Find and lock appointments in draft
+        const lockedAppointments: Appointment[] = [];
+        for (const cid of conflictIds) {
+          const apt = draftAppointments.find(a => a.id === cid);
+          if (!apt) throw new Error(`El turno ${cid} no existe o no fue encontrado.`);
+          lockedAppointments.push(apt);
+        }
+
+        if (adjuntarBeneficio && benefitAppointmentIds.length > 0) {
+          const conflictSet = new Set(conflictIds);
+          for (const bId of benefitAppointmentIds) {
+            if (!conflictSet.has(bId)) {
+              throw new Error('Uno o más turnos seleccionados para recibir beneficio no pertenecen al lote de turnos afectados.');
+            }
+          }
+        }
+
+        // 4. Update appointments in draft
+        for (const apt of lockedAppointments) {
+          apt.estado = 'cancelado';
+          apt.motivoCancelacion = apt.motivoCancelacion || cancelMotivo;
+          apt.canceladoEn = apt.canceladoEn || now;
+          apt.canceladoOrigen = apt.canceladoOrigen || 'excepcion_disponibilidad';
+          apt.canceladoPor = apt.canceladoPor || canceladoPor;
+          apt.updatedAt = now;
+        }
+
+        // 5. Update exceptions in draft
+        for (const exc of exceptionsToCreate) {
+          const existIdx = draftExceptions.findIndex(e => e.id === exc.id);
+          if (existIdx !== -1) {
+            draftExceptions[existIdx] = exc;
+          } else {
+            draftExceptions.unshift(exc);
+          }
+        }
+
+        // 6. Issue benefits & record notifications in draft
+        const issuedBenefits: ClientBenefit[] = [];
+        const appointmentResults: AppointmentCancellationResult[] = [];
+
+        for (let i = 0; i < lockedAppointments.length; i++) {
+          const apt = lockedAppointments[i];
+          const origApt = (memoryDb.appointments || []).find(a => a.id === apt.id);
+          const wasAlreadyCancelled = origApt?.estado === 'cancelado';
+          const cancelledInThisExecution = !wasAlreadyCancelled;
+
+          let aptBenefit: ClientBenefit | null = null;
+          let benefitCreatedInThisExecution = false;
+
+          if (adjuntarBeneficio && lockedTemplate && benefitAppointmentIds.includes(apt.id)) {
+            const existing = draftBenefits.find(b => b.turnoOrigenId === apt.id);
+            if (existing) {
+              aptBenefit = existing;
+              issuedBenefits.push(existing);
+              benefitCreatedInThisExecution = false;
+            } else {
+              const benefitId = `ben-${Date.now()}-${Math.floor(Math.random() * 10000)}-${i}`;
+              const cliId = apt.clienteId || `cli-${apt.telefono}`;
+              const cliNombre = `${apt.nombre} ${apt.apellido}`.trim();
+              const cliTel = apt.telefono;
+              const cliEmail = apt.email || undefined;
+              const titulo = lockedTemplate.nombrePublico;
+              const descripcion = lockedTemplate.descripcionPublica || undefined;
+              const tipoDesc = lockedTemplate.tipoDescuento;
+              const valDesc = lockedTemplate.valorDescuento;
+              const servAplicables = lockedTemplate.serviciosAplicables || ['todos'];
+              const montoMin = lockedTemplate.montoMinimo != null ? lockedTemplate.montoMinimo : null;
+              const origenDetalle = `Turno ${apt.codigo} cancelado por excepción de disponibilidad`;
+              const otorgadoPor = canceladoPor || 'Sistema / Excepción de horarios';
+
+              aptBenefit = {
+                id: benefitId,
+                clienteId: cliId,
+                clienteNombre: cliNombre,
+                clienteTelefono: cliTel,
+                clienteEmail: cliEmail,
+                templateId: lockedTemplate.id,
+                titulo,
+                descripcion,
+                tipoDescuento: tipoDesc,
+                valorDescuento: valDesc,
+                origen: 'cancelacion_excepcion',
+                origenDetalle,
+                fechaEmision: businessToday,
+                fechaVencimiento: expirationDate,
+                estado: 'disponible',
+                turnoOrigenId: apt.id,
+                turnoOrigenCodigo: apt.codigo,
+                serviciosAplicables: servAplicables,
+                montoMinimo: montoMin,
+                otorgadoPor,
+                createdAt: now,
+                updatedAt: now
+              };
+              draftBenefits.unshift(aptBenefit);
+              issuedBenefits.push(aptBenefit);
+              benefitCreatedInThisExecution = true;
+            }
+          }
+
+          // Idempotency & notification state in draft
+          const idempotencyKey = `exc-cancel-${apt.id}-${payload.fecha}`;
+          const existingLog = draftNotificationLogs.find(l => l.idempotencyKey === idempotencyKey && l.channel === 'email');
+
+          let shouldSendNotification = false;
+          let notificationStatus: 'pending' | 'omitido_sin_email' | 'already_sent' | 'skipped' = 'pending';
+          const hasValidEmail = Boolean(apt.email && apt.email.trim());
+
+          if (existingLog) {
+            if (existingLog.status === 'sent') {
+              shouldSendNotification = false;
+              notificationStatus = 'already_sent';
+            } else if (existingLog.status === 'omitido_sin_email') {
+              shouldSendNotification = false;
+              notificationStatus = 'omitido_sin_email';
+            } else if (existingLog.status === 'pending') {
+              shouldSendNotification = hasValidEmail;
+              notificationStatus = hasValidEmail ? 'pending' : 'omitido_sin_email';
+            } else {
+              shouldSendNotification = hasValidEmail;
+              notificationStatus = hasValidEmail ? 'pending' : 'omitido_sin_email';
+            }
+          } else {
+            if (!hasValidEmail) {
+              shouldSendNotification = false;
+              notificationStatus = 'omitido_sin_email';
+              draftNotificationLogs.unshift({
+                id: `notif-email-${Date.now()}-${i}`,
+                appointmentId: apt.id,
+                channel: 'email',
+                recipient: 'sin_email',
+                notificationType: 'appointment_cancellation',
+                status: 'omitido_sin_email',
+                error: 'no enviado por falta de email',
+                idempotencyKey,
+                sentAt: now,
+                metadata: {
+                  codigo: apt.codigo,
+                  fecha: apt.fecha,
+                  servicioNombre: apt.servicioNombre,
+                  motivoCancelacion: cancelMotivo
+                }
+              });
+            } else {
+              shouldSendNotification = true;
+              notificationStatus = 'pending';
+              draftNotificationLogs.unshift({
+                id: `notif-email-${Date.now()}-${i}`,
+                appointmentId: apt.id,
+                channel: 'email',
+                recipient: apt.email!.trim(),
+                notificationType: 'appointment_cancellation',
+                status: 'pending',
+                idempotencyKey,
+                sentAt: now,
+                metadata: {
+                  codigo: apt.codigo,
+                  fecha: apt.fecha,
+                  servicioNombre: apt.servicioNombre,
+                  motivoCancelacion: cancelMotivo
+                }
+              });
+            }
+          }
+
+          appointmentResults.push({
+            appointment: apt,
+            wasAlreadyCancelled: Boolean(wasAlreadyCancelled),
+            cancelledInThisExecution,
+            benefit: aptBenefit,
+            benefitCreatedInThisExecution,
+            shouldSendNotification,
+            notificationStatus
+          });
+        }
+
+        // 7. ATOMIC COMMIT TO MEMORY DB & SINGLE FILE PERSISTENCE
+        memoryDb.appointments = draftAppointments;
+        memoryDb.availabilityExceptions = draftExceptions;
+        memoryDb.clientBenefits = draftBenefits;
+        memoryDb.notificationLogs = draftNotificationLogs;
+
+        saveLocalFileDb();
+
+        resolve({
+          exceptions: exceptionsToCreate,
+          cancelledAppointments: lockedAppointments,
+          issuedBenefits,
+          appointmentResults
+        });
+      } catch (err) {
+        // Failure: memoryDb is left 100% untouched
+        reject(err);
       }
-    }
-    if (updatedAppointments.length === 0) {
-      updatedAppointments = memoryUpdated;
-    }
-  }
-
-  if (!memoryDb.availabilityExceptions) memoryDb.availabilityExceptions = [];
-  for (const exc of exceptionsToCreate) {
-    memoryDb.availabilityExceptions.unshift(exc);
-  }
-  saveLocalFileDb();
-
-  return {
-    exceptions: exceptionsToCreate,
-    cancelledAppointments: updatedAppointments
-  };
+    }).catch(err => {
+      reject(err);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -4299,6 +5626,7 @@ function mapClientBenefitRow(row: any): ClientBenefit {
     clienteNombre: row.cliente_nombre || undefined,
     clienteTelefono: row.cliente_telefono || undefined,
     clienteEmail: row.cliente_email || undefined,
+    templateId: row.template_id || undefined,
     titulo: row.titulo,
     descripcion: row.descripcion || undefined,
     tipoDescuento: row.tipo_descuento as DiscountType,
@@ -4317,6 +5645,24 @@ function mapClientBenefitRow(row: any): ClientBenefit {
     montoMinimo: row.monto_minimo != null ? Number(row.monto_minimo) : null,
     descuentoAplicado: row.descuento_aplicado != null ? Number(row.descuento_aplicado) : null,
     otorgadoPor: row.otorgado_por || undefined,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
+  };
+}
+
+export function mapBenefitTemplateRow(row: any): BenefitTemplate {
+  return {
+    id: row.id,
+    nombrePublico: row.nombre_publico,
+    descripcionPublica: row.descripcion_publica || undefined,
+    tipoDescuento: row.tipo_descuento as DiscountType,
+    valorDescuento: Number(row.valor_descuento),
+    vigenciaDias: Number(row.vigencia_dias),
+    serviciosAplicables: typeof row.servicios_aplicables === 'string'
+      ? JSON.parse(row.servicios_aplicables)
+      : (row.servicios_aplicables || ['todos']),
+    montoMinimo: row.monto_minimo != null ? Number(row.monto_minimo) : null,
+    activo: Boolean(row.activo),
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
   };
@@ -4554,12 +5900,12 @@ export async function validatePromotion(params: {
     return { valido: false, error: `La promoción "${promo.nombre}" se encuentra inactiva.` };
   }
 
-  const todayStr = params.fecha || new Date().toISOString().split('T')[0];
+  const todayStr = params.fecha || getBusinessDate();
   if (promo.fechaInicio && todayStr < promo.fechaInicio) {
-    return { valido: false, error: `Esta promoción aún no está vigente (comienza el ${promo.fechaInicio}).` };
+    return { valido: false, error: `Esta promoción aún no está vigente (comienza el ${isoDateToAR(promo.fechaInicio)}).` };
   }
   if (promo.fechaVencimiento && todayStr > promo.fechaVencimiento) {
-    return { valido: false, error: `Esta promoción ha vencido el ${promo.fechaVencimiento}.` };
+    return { valido: false, error: `Esta promoción ha vencido el ${isoDateToAR(promo.fechaVencimiento)}.` };
   }
 
   // Check total usage limit
@@ -4630,7 +5976,7 @@ export async function validatePromotion(params: {
         const reusableDate = new Date(lastDate + promo.periodoReutilizacionDias * 86400000);
         return {
           valido: false,
-          error: `Ya has utilizado esta promoción recientemente. Podrás volver a utilizarla a partir del ${reusableDate.toLocaleDateString('es-AR')}.`
+          error: `Ya has utilizado esta promoción recientemente. Podrás volver a utilizarla a partir del ${formatDateAR(reusableDate)}.`
         };
       }
     }
@@ -4733,7 +6079,7 @@ export async function getAvailableClientBenefits(params: {
 }): Promise<ClientBenefit[]> {
   const cleanPhone = normalizePhone(params.telefono || '');
   const cleanEmail = normalizeEmail(params.email || '');
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getBusinessDate();
 
   let benefits: ClientBenefit[] = [];
 
@@ -4789,10 +6135,37 @@ export async function getAvailableClientBenefits(params: {
   return validBenefits;
 }
 
+export function normalizeBenefitOrigin(origin?: string | null): BenefitOrigin {
+  const clean = (origin || '').trim().toLowerCase();
+  if (clean === 'fidelizacion' || clean === 'fidelidad') return 'fidelidad';
+  if (clean === 'compensacion') return 'compensacion';
+  if (clean === 'cancelacion_excepcion') return 'cancelacion_excepcion';
+  if (clean === 'cumpleanos') return 'cumpleanos';
+  if (clean === 'promocion_especial') return 'promocion_especial';
+  if (clean === 'otro') return 'otro';
+  return 'admin';
+}
+
+export async function getClientBenefitById(id: string): Promise<ClientBenefit | null> {
+  const cleanId = (id || '').trim();
+  if (!cleanId) return null;
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query('SELECT * FROM client_benefits WHERE id = $1', [cleanId]);
+      if (res.rows.length > 0) return mapClientBenefitRow(res.rows[0]);
+    } catch (err) {
+      console.error('Error fetching client benefit by id from PostgreSQL:', err);
+    }
+  }
+
+  return memoryDb.clientBenefits?.find(b => b.id === cleanId) || null;
+}
+
 export async function createClientBenefit(benefitData: Omit<ClientBenefit, 'id' | 'createdAt' | 'updatedAt' | 'estado'>): Promise<ClientBenefit> {
   const id = `ben-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const now = new Date().toISOString();
-  const todayStr = now.split('T')[0];
+  const todayStr = getBusinessDate();
 
   // Fetch client details if not present
   let clientName = benefitData.clienteNombre;
@@ -4820,6 +6193,7 @@ export async function createClientBenefit(benefitData: Omit<ClientBenefit, 'id' 
     clienteNombre: clientName,
     clienteTelefono: cleanPhoneStr,
     clienteEmail: cleanEmailStr,
+    origen: normalizeBenefitOrigin(benefitData.origen),
     fechaEmision: benefitData.fechaEmision || todayStr,
     estado: 'disponible',
     serviciosAplicables: benefitData.serviciosAplicables || ['todos'],
@@ -4832,17 +6206,17 @@ export async function createClientBenefit(benefitData: Omit<ClientBenefit, 'id' 
       await pgPool.query(`
         INSERT INTO client_benefits (
           id, cliente_id, cliente_nombre, cliente_telefono, cliente_email,
-          titulo, descripcion, tipo_descuento, valor_descuento,
+          template_id, titulo, descripcion, tipo_descuento, valor_descuento,
           origen, origen_detalle, fecha_emision, fecha_vencimiento,
           estado, turno_origen_id, turno_origen_codigo,
           servicios_aplicables, monto_minimo, otorgado_por,
           created_at, updated_at
         ) VALUES (
           $1, $2, $3, $4, $5,
-          $6, $7, $8, $9,
-          $10, $11, $12, $13,
-          $14, $15, $16,
-          $17, $18, $19,
+          $6, $7, $8, $9, $10,
+          $11, $12, $13, $14,
+          $15, $16, $17,
+          $18, $19, $20,
           NOW(), NOW()
         )
       `, [
@@ -4851,6 +6225,7 @@ export async function createClientBenefit(benefitData: Omit<ClientBenefit, 'id' 
         newBenefit.clienteNombre || null,
         newBenefit.clienteTelefono || null,
         newBenefit.clienteEmail || null,
+        newBenefit.templateId || null,
         newBenefit.titulo,
         newBenefit.descripcion || null,
         newBenefit.tipoDescuento,
@@ -4879,23 +6254,67 @@ export async function createClientBenefit(benefitData: Omit<ClientBenefit, 'id' 
   return newBenefit;
 }
 
-export async function updateClientBenefit(id: string, updates: Partial<ClientBenefit>): Promise<ClientBenefit | null> {
+export async function updateClientBenefit(
+  id: string,
+  updates: Partial<ClientBenefit>
+): Promise<UpdateBenefitResult> {
   const cleanId = (id || '').trim();
   const now = new Date().toISOString();
 
   if (isPostgresConnected && pgPool) {
     try {
+      // 1. Fetch current benefit to merge allowed fields and verify origin/compensation immutability
       const currentRes = await pgPool.query('SELECT * FROM client_benefits WHERE id = $1', [cleanId]);
-      if (currentRes.rows.length === 0) return null;
+      if (currentRes.rows.length === 0) {
+        return { success: false, reason: 'not_found' };
+      }
       const current = mapClientBenefitRow(currentRes.rows[0]);
 
+      if (current.estado === 'usado') {
+        return { success: false, reason: 'already_used' };
+      }
+      if (current.estado === 'cancelado') {
+        return { success: false, reason: 'already_cancelled' };
+      }
+      if (current.estado !== 'disponible') {
+        return { success: false, reason: 'not_available' };
+      }
+
+      // Check compensation protection: compensation origins cannot be altered or have originDetalle modified
+      const isCompensation = current.origen === 'compensacion' || current.origen === 'cancelacion_excepcion' || Boolean(current.turnoOrigenId);
+      
       const merged: ClientBenefit = {
         ...current,
-        ...updates,
+        titulo: updates.titulo !== undefined ? updates.titulo : current.titulo,
+        descripcion: updates.descripcion !== undefined ? updates.descripcion : current.descripcion,
+        tipoDescuento: updates.tipoDescuento !== undefined ? updates.tipoDescuento : current.tipoDescuento,
+        valorDescuento: updates.valorDescuento !== undefined ? updates.valorDescuento : current.valorDescuento,
+        fechaVencimiento: updates.fechaVencimiento !== undefined ? updates.fechaVencimiento : current.fechaVencimiento,
+        serviciosAplicables: updates.serviciosAplicables !== undefined ? updates.serviciosAplicables : current.serviciosAplicables,
+        montoMinimo: updates.montoMinimo !== undefined ? updates.montoMinimo : current.montoMinimo,
+        otorgadoPor: updates.otorgadoPor !== undefined ? updates.otorgadoPor : current.otorgadoPor,
+        estado: updates.estado === 'cancelado' ? 'cancelado' : current.estado,
+        // If it's a compensation, origin and originDetalle MUST remain immutable.
+        // For administrative benefits, origin remains as created or can only be non-compensation if updated.
+        origen: current.origen,
+        origenDetalle: isCompensation ? current.origenDetalle : (updates.origenDetalle !== undefined ? updates.origenDetalle : current.origenDetalle),
+        // Guaranteed protected internal fields
+        clienteId: current.clienteId,
+        clienteNombre: current.clienteNombre,
+        clienteTelefono: current.clienteTelefono,
+        clienteEmail: current.clienteEmail,
+        turnoOrigenId: current.turnoOrigenId,
+        turnoOrigenCodigo: current.turnoOrigenCodigo,
+        turnoUsoId: current.turnoUsoId,
+        turnoUsoCodigo: current.turnoUsoCodigo,
+        usadoEn: current.usadoEn,
+        descuentoAplicado: current.descuentoAplicado,
+        createdAt: current.createdAt,
         updatedAt: now
       };
 
-      await pgPool.query(`
+      // 2. Execute Atomic Conditional UPDATE conditioned on estado = 'disponible'
+      const updateRes = await pgPool.query(`
         UPDATE client_benefits
         SET titulo = $1,
             descripcion = $2,
@@ -4903,14 +6322,14 @@ export async function updateClientBenefit(id: string, updates: Partial<ClientBen
             valor_descuento = $4,
             fecha_vencimiento = $5,
             estado = $6,
-            turno_uso_id = $7,
-            turno_uso_codigo = $8,
-            usado_en = $9,
-            descuento_aplicado = $10,
-            servicios_aplicables = $11,
-            monto_minimo = $12,
+            servicios_aplicables = $7,
+            monto_minimo = $8,
+            otorgado_por = $9,
+            origen_detalle = $10,
             updated_at = NOW()
-        WHERE id = $13
+        WHERE id = $11
+          AND estado = 'disponible'
+        RETURNING *
       `, [
         merged.titulo,
         merged.descripcion || null,
@@ -4918,30 +6337,74 @@ export async function updateClientBenefit(id: string, updates: Partial<ClientBen
         merged.valorDescuento,
         merged.fechaVencimiento || null,
         merged.estado,
-        merged.turnoUsoId || null,
-        merged.turnoUsoCodigo || null,
-        merged.usadoEn ? new Date(merged.usadoEn) : null,
-        merged.descuentoAplicado || null,
         JSON.stringify(merged.serviciosAplicables || ['todos']),
         merged.montoMinimo || null,
+        merged.otorgadoPor || null,
+        merged.origenDetalle || null,
         cleanId
       ]);
 
-      return merged;
+      if (updateRes.rows.length === 0) {
+        // Atomic condition was not met (e.g. concurrent consumption or cancellation occurred)
+        const recheckRes = await pgPool.query('SELECT estado FROM client_benefits WHERE id = $1', [cleanId]);
+        if (recheckRes.rows.length === 0) {
+          return { success: false, reason: 'not_found' };
+        }
+        const state = recheckRes.rows[0].estado;
+        if (state === 'usado') return { success: false, reason: 'already_used' };
+        if (state === 'cancelado') return { success: false, reason: 'already_cancelled' };
+        return { success: false, reason: 'not_available' };
+      }
+
+      return { success: true, benefit: mapClientBenefitRow(updateRes.rows[0]) };
     } catch (err) {
       console.error('Error updating client benefit in PostgreSQL:', err);
       throw err;
     }
   }
 
+  // Fallback for memoryDb (Single synchronous atomic check & update)
   if (!memoryDb.clientBenefits) memoryDb.clientBenefits = [];
   const idx = memoryDb.clientBenefits.findIndex(b => b.id === cleanId);
-  if (idx === -1) return null;
+  if (idx === -1) return { success: false, reason: 'not_found' };
 
-  const merged = { ...memoryDb.clientBenefits[idx], ...updates, updatedAt: now };
+  const current = memoryDb.clientBenefits[idx];
+  if (current.estado === 'usado') return { success: false, reason: 'already_used' };
+  if (current.estado === 'cancelado') return { success: false, reason: 'already_cancelled' };
+  if (current.estado !== 'disponible') return { success: false, reason: 'not_available' };
+
+  const isCompensation = current.origen === 'compensacion' || current.origen === 'cancelacion_excepcion' || Boolean(current.turnoOrigenId);
+
+  const merged: ClientBenefit = {
+    ...current,
+    titulo: updates.titulo !== undefined ? updates.titulo : current.titulo,
+    descripcion: updates.descripcion !== undefined ? updates.descripcion : current.descripcion,
+    tipoDescuento: updates.tipoDescuento !== undefined ? updates.tipoDescuento : current.tipoDescuento,
+    valorDescuento: updates.valorDescuento !== undefined ? updates.valorDescuento : current.valorDescuento,
+    fechaVencimiento: updates.fechaVencimiento !== undefined ? updates.fechaVencimiento : current.fechaVencimiento,
+    serviciosAplicables: updates.serviciosAplicables !== undefined ? updates.serviciosAplicables : current.serviciosAplicables,
+    montoMinimo: updates.montoMinimo !== undefined ? updates.montoMinimo : current.montoMinimo,
+    otorgadoPor: updates.otorgadoPor !== undefined ? updates.otorgadoPor : current.otorgadoPor,
+    estado: updates.estado === 'cancelado' ? 'cancelado' : current.estado,
+    origen: current.origen,
+    origenDetalle: isCompensation ? current.origenDetalle : (updates.origenDetalle !== undefined ? updates.origenDetalle : current.origenDetalle),
+    clienteId: current.clienteId,
+    clienteNombre: current.clienteNombre,
+    clienteTelefono: current.clienteTelefono,
+    clienteEmail: current.clienteEmail,
+    turnoOrigenId: current.turnoOrigenId,
+    turnoOrigenCodigo: current.turnoOrigenCodigo,
+    turnoUsoId: current.turnoUsoId,
+    turnoUsoCodigo: current.turnoUsoCodigo,
+    usadoEn: current.usadoEn,
+    descuentoAplicado: current.descuentoAplicado,
+    createdAt: current.createdAt,
+    updatedAt: now
+  };
+
   memoryDb.clientBenefits[idx] = merged;
   saveLocalFileDb();
-  return merged;
+  return { success: true, benefit: merged };
 }
 
 export async function validateClientBenefit(params: {
@@ -4973,10 +6436,10 @@ export async function validateClientBenefit(params: {
     return { valido: false, error: `Este beneficio ya no se encuentra disponible (estado: ${benefit.estado}).` };
   }
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getBusinessDate();
   if (benefit.fechaVencimiento && todayStr > benefit.fechaVencimiento) {
     updateClientBenefit(benefit.id, { estado: 'vencido' }).catch(() => {});
-    return { valido: false, error: `Este beneficio ha vencido el ${benefit.fechaVencimiento}.` };
+    return { valido: false, error: `Este beneficio ha vencido el ${isoDateToAR(benefit.fechaVencimiento)}.` };
   }
 
   // Check client matching
@@ -5074,11 +6537,11 @@ export async function grantCompensationBenefitForCancelledAppointment(params: {
   if (!expDate && params.diasValidez && params.diasValidez > 0) {
     const d = new Date();
     d.setDate(d.getDate() + params.diasValidez);
-    expDate = d.toISOString().split('T')[0];
+    expDate = getBusinessDate(d);
   }
 
   const titulo = params.titulo || `Compensación por cancelación de turno (${apt.codigo})`;
-  const descripcion = params.descripcion || `Beneficio de compensación otorgado por cancelación del turno ${apt.servicioNombre} del ${apt.fecha}`;
+  const descripcion = params.descripcion || `Beneficio de compensación otorgado por cancelación del turno ${apt.servicioNombre} del ${isoDateToAR(apt.fecha)}`;
 
   try {
     return await createClientBenefit({
@@ -5092,7 +6555,7 @@ export async function grantCompensationBenefitForCancelledAppointment(params: {
       valorDescuento: params.valorDescuento,
       origen: 'cancelacion_excepcion',
       origenDetalle: `Turno ${apt.codigo} cancelado por excepción de agenda`,
-      fechaEmision: new Date().toISOString().split('T')[0],
+      fechaEmision: getBusinessDate(),
       fechaVencimiento: expDate,
       turnoOrigenId: apt.id,
       turnoOrigenCodigo: apt.codigo,
@@ -5113,5 +6576,193 @@ export async function grantCompensationBenefitForCancelledAppointment(params: {
     }
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// CRUD OPERATIONS: BENEFIT TEMPLATES (CATÁLOGO ADMINISTRATIVO REUTILIZABLE)
+// ---------------------------------------------------------------------------
+
+export async function getBenefitTemplates(params?: {
+  activo?: boolean;
+  search?: string;
+}): Promise<BenefitTemplate[]> {
+  if (isPostgresConnected && pgPool) {
+    try {
+      const conditions: string[] = [];
+      const values: any[] = [];
+
+      if (params?.activo !== undefined) {
+        values.push(params.activo);
+        conditions.push(`activo = $${values.length}`);
+      }
+
+      if (params?.search) {
+        values.push(`%${params.search.toLowerCase()}%`);
+        conditions.push(`(
+          LOWER(nombre_publico) LIKE $${values.length} OR
+          LOWER(COALESCE(descripcion_publica, '')) LIKE $${values.length}
+        )`);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const res = await pgPool.query(`SELECT * FROM benefit_templates ${whereClause} ORDER BY created_at DESC`, values);
+      return res.rows.map(row => mapBenefitTemplateRow(row));
+    } catch (err) {
+      console.error('Error fetching benefit templates from PostgreSQL:', err);
+    }
+  }
+
+  let list = memoryDb.benefitTemplates || [];
+  if (params?.activo !== undefined) {
+    list = list.filter(t => t.activo === params.activo);
+  }
+  if (params?.search) {
+    const q = params.search.toLowerCase();
+    list = list.filter(t =>
+      t.nombrePublico.toLowerCase().includes(q) ||
+      (t.descripcionPublica && t.descripcionPublica.toLowerCase().includes(q))
+    );
+  }
+  return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getBenefitTemplateById(id: string): Promise<BenefitTemplate | null> {
+  const cleanId = (id || '').trim();
+  if (!cleanId) return null;
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const res = await pgPool.query('SELECT * FROM benefit_templates WHERE id = $1', [cleanId]);
+      if (res.rows.length > 0) return mapBenefitTemplateRow(res.rows[0]);
+    } catch (err) {
+      console.error('Error fetching benefit template by id from PostgreSQL:', err);
+    }
+  }
+
+  return memoryDb.benefitTemplates?.find(t => t.id === cleanId) || null;
+}
+
+export async function createBenefitTemplate(templateData: Omit<BenefitTemplate, 'id' | 'createdAt' | 'updatedAt'>): Promise<BenefitTemplate> {
+  const id = `btpl-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const now = new Date().toISOString();
+
+  const newTemplate: BenefitTemplate = {
+    ...templateData,
+    id,
+    nombrePublico: templateData.nombrePublico.trim(),
+    descripcionPublica: templateData.descripcionPublica ? templateData.descripcionPublica.trim() : undefined,
+    tipoDescuento: templateData.tipoDescuento === 'monto_fijo' ? 'monto_fijo' : 'porcentaje',
+    valorDescuento: Number(templateData.valorDescuento),
+    vigenciaDias: Number(templateData.vigenciaDias),
+    serviciosAplicables: Array.isArray(templateData.serviciosAplicables) && templateData.serviciosAplicables.length > 0
+      ? templateData.serviciosAplicables
+      : ['todos'],
+    montoMinimo: templateData.montoMinimo != null && templateData.montoMinimo > 0 ? Number(templateData.montoMinimo) : null,
+    activo: templateData.activo !== false,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      await pgPool.query(`
+        INSERT INTO benefit_templates (
+          id, nombre_publico, descripcion_publica, tipo_descuento, valor_descuento,
+          vigencia_dias, servicios_aplicables, monto_minimo, activo, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+      `, [
+        newTemplate.id,
+        newTemplate.nombrePublico,
+        newTemplate.descripcionPublica || null,
+        newTemplate.tipoDescuento,
+        newTemplate.valorDescuento,
+        newTemplate.vigenciaDias,
+        JSON.stringify(newTemplate.serviciosAplicables),
+        newTemplate.montoMinimo || null,
+        newTemplate.activo
+      ]);
+      return newTemplate;
+    } catch (err) {
+      console.error('Error creating benefit template in PostgreSQL:', err);
+      throw err;
+    }
+  }
+
+  if (!memoryDb.benefitTemplates) memoryDb.benefitTemplates = [];
+  memoryDb.benefitTemplates.unshift(newTemplate);
+  saveLocalFileDb();
+  return newTemplate;
+}
+
+export async function updateBenefitTemplate(id: string, updates: Partial<BenefitTemplate>): Promise<BenefitTemplate | null> {
+  const cleanId = (id || '').trim();
+  if (!cleanId) return null;
+  const now = new Date().toISOString();
+
+  if (isPostgresConnected && pgPool) {
+    try {
+      const currentRes = await pgPool.query('SELECT * FROM benefit_templates WHERE id = $1', [cleanId]);
+      if (currentRes.rows.length === 0) return null;
+      const current = mapBenefitTemplateRow(currentRes.rows[0]);
+
+      const merged: BenefitTemplate = {
+        ...current,
+        ...updates,
+        id: current.id,
+        createdAt: current.createdAt,
+        updatedAt: now
+      };
+
+      await pgPool.query(`
+        UPDATE benefit_templates
+        SET nombre_publico = $1,
+            descripcion_publica = $2,
+            tipo_descuento = $3,
+            valor_descuento = $4,
+            vigencia_dias = $5,
+            servicios_aplicables = $6,
+            monto_minimo = $7,
+            activo = $8,
+            updated_at = NOW()
+        WHERE id = $9
+      `, [
+        merged.nombrePublico,
+        merged.descripcionPublica || null,
+        merged.tipoDescuento,
+        merged.valorDescuento,
+        merged.vigenciaDias,
+        JSON.stringify(merged.serviciosAplicables || ['todos']),
+        merged.montoMinimo || null,
+        merged.activo,
+        cleanId
+      ]);
+
+      return merged;
+    } catch (err) {
+      console.error('Error updating benefit template in PostgreSQL:', err);
+      throw err;
+    }
+  }
+
+  if (!memoryDb.benefitTemplates) memoryDb.benefitTemplates = [];
+  const idx = memoryDb.benefitTemplates.findIndex(t => t.id === cleanId);
+  if (idx === -1) return null;
+
+  const merged: BenefitTemplate = {
+    ...memoryDb.benefitTemplates[idx],
+    ...updates,
+    id: memoryDb.benefitTemplates[idx].id,
+    createdAt: memoryDb.benefitTemplates[idx].createdAt,
+    updatedAt: now
+  };
+  memoryDb.benefitTemplates[idx] = merged;
+  saveLocalFileDb();
+  return merged;
+}
+
+export async function toggleBenefitTemplateActive(id: string): Promise<BenefitTemplate | null> {
+  const template = await getBenefitTemplateById(id);
+  if (!template) return null;
+  return await updateBenefitTemplate(id, { activo: !template.activo });
 }
 

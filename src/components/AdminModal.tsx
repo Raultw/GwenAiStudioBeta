@@ -29,7 +29,8 @@ import {
   RotateCcw,
   CalendarCheck,
   Loader2,
-  Tag
+  Tag,
+  Gift
 } from 'lucide-react';
 import type { 
   Appointment, 
@@ -48,6 +49,13 @@ import { ScheduleManagementAdmin } from './ScheduleManagementAdmin.js';
 import { AvailabilityExceptionsAdmin } from './AvailabilityExceptionsAdmin.js';
 import { ProfessionalManagementAdmin } from './ProfessionalManagementAdmin.js';
 import { PromotionsManagementAdmin } from './PromotionsManagementAdmin.js';
+import { ClientBenefitsAdmin } from './ClientBenefitsAdmin.js';
+import { BenefitTemplatesAdmin } from './BenefitTemplatesAdmin.js';
+import { 
+  getBusinessDate, 
+  isoDateToAR, 
+  formatDateTimeAR 
+} from '../utils/dateUtils.js';
 
 interface AdminModalProps {
   isOpen: boolean;
@@ -89,11 +97,7 @@ const SERVICE_FEATURE_PRESETS = [
 ];
 
 const getTodayDateString = () => {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return getBusinessDate();
 };
 
 export const AdminModal: React.FC<AdminModalProps> = ({
@@ -102,10 +106,13 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   onRefreshPublicData
 }) => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [pinInput, setPinInput] = useState<string>('');
-  const [pinError, setPinError] = useState<string | null>(null);
+  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
+  const [usernameInput, setUsernameInput] = useState<string>('');
+  const [passwordInput, setPasswordInput] = useState<string>('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<any | null>(null);
 
-  const [activeTab, setActiveTab] = useState<'agenda' | 'clientes' | 'profesionales' | 'horarios' | 'excepciones' | 'nuevo' | 'servicios' | 'promociones' | 'stats'>('agenda');
+  const [activeTab, setActiveTab] = useState<'agenda' | 'clientes' | 'profesionales' | 'horarios' | 'excepciones' | 'nuevo' | 'servicios' | 'promociones' | 'plantillas-beneficios' | 'beneficios' | 'stats'>('agenda');
   const [clientLookupForFicha, setClientLookupForFicha] = useState<{ id?: string; telefono?: string; nombre?: string; apellido?: string } | null>(null);
   const [selectedAppointmentForDetail, setSelectedAppointmentForDetail] = useState<Appointment | null>(null);
   const [selectedProfForSchedule, setSelectedProfForSchedule] = useState<string | null>(null);
@@ -266,7 +273,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     });
 
     try {
-      const res = await fetch(`/api/servicios/${srv.id}/profesionales`);
+      const res = await fetch(`/api/servicios/${srv.id}/profesionales`, { credentials: 'include' });
       if (res.ok) {
         const assigned: Professional[] = await res.json();
         const assignedIds = assigned.map(p => p.id);
@@ -287,38 +294,61 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     scrollToServiceForm();
   };
 
-  // Verify PIN
-  const handlePinSubmit = async (e: React.FormEvent) => {
+  // Login handler
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setPinError(null);
+    setLoginError(null);
     try {
-      const res = await fetch('/api/admin/verify-pin', {
+      const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: pinInput })
+        credentials: 'include',
+        body: JSON.stringify({ identifier: usernameInput, password: passwordInput })
       });
+      const data = await res.json();
       if (res.ok) {
         setIsAuthenticated(true);
+        setCurrentUser(data.user);
         loadAdminData();
       } else {
-        setPinError('PIN incorrecto. El PIN por defecto es 1234');
+        setLoginError(data.error || 'Credenciales inválidas');
       }
     } catch (err) {
-      setPinError('Error de verificación con el servidor');
+      setLoginError('Error de conexión con el servidor');
     }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch {}
+    setIsAuthenticated(false);
+    setCurrentUser(null);
+    setUsernameInput('');
+    setPasswordInput('');
+  };
+
+  const handleAuthError = () => {
+    setIsAuthenticated(false);
+    setCurrentUser(null);
   };
 
   const loadAdminData = async () => {
     setIsLoading(true);
     try {
       const [aptRes, srvRes, profRes, cfgRes, statsRes, dbRes] = await Promise.all([
-        fetch('/api/turnos'),
-        fetch('/api/servicios?all=true'),
-        fetch('/api/profesionales?all=true'),
-        fetch('/api/config'),
-        fetch('/api/turnos/stats'),
-        fetch('/api/db-status')
+        fetch('/api/turnos', { credentials: 'include' }),
+        fetch('/api/servicios?all=true', { credentials: 'include' }),
+        fetch('/api/profesionales?all=true', { credentials: 'include' }),
+        fetch('/api/config', { credentials: 'include' }),
+        fetch('/api/turnos/stats', { credentials: 'include' }),
+        fetch('/api/db-status', { credentials: 'include' })
       ]);
+
+      if (aptRes.status === 401 || srvRes.status === 401 || profRes.status === 401) {
+        handleAuthError();
+        return;
+      }
 
       if (aptRes.ok) setAppointments(await aptRes.json());
       if (srvRes.ok) setServices(await srvRes.json());
@@ -338,6 +368,31 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       setStatusFilter('pendiente');
       setDateFilter(getTodayDateString());
       setSearchQuery('');
+      setIsCheckingAuth(true);
+      // Check existing backend session cookie
+      fetch('/api/auth/me', { credentials: 'include' })
+        .then(async res => {
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.user) {
+              setIsAuthenticated(true);
+              setCurrentUser(data.user);
+            } else {
+              setIsAuthenticated(false);
+              setCurrentUser(null);
+            }
+          } else {
+            setIsAuthenticated(false);
+            setCurrentUser(null);
+          }
+        })
+        .catch(() => {
+          setIsAuthenticated(false);
+          setCurrentUser(null);
+        })
+        .finally(() => {
+          setIsCheckingAuth(false);
+        });
     }
   }, [isOpen]);
 
@@ -746,7 +801,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     }
     const msg = encodeURIComponent(
       `¡Hola ${apt.nombre}! Te escribimos desde *Gwen Nails* ✨\n\n` +
-      `Queríamos confirmarte tu turno para *${apt.servicioNombre}* el día *${apt.fecha}* a las *${apt.horaInicio} hs*.\n` +
+      `Queríamos confirmarte tu turno para *${apt.servicioNombre}* el día *${isoDateToAR(apt.fecha)}* a las *${apt.horaInicio} hs*.\n` +
       `Estudio: Gorriti 5540, Palermo Hollywood.\n\n` +
       `¿Nos confirmás asistencia? ¡Muchas gracias!`
     );
@@ -803,11 +858,11 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             )}
             {isAuthenticated && (
               <button
-                onClick={loadAdminData}
-                className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-[#E8DCC4] transition-colors cursor-pointer"
-                title="Actualizar datos"
+                onClick={handleLogout}
+                className="px-2.5 py-1 rounded-lg bg-rose-900/60 hover:bg-rose-900 text-rose-200 text-xs transition-colors cursor-pointer"
+                title="Cerrar sesión"
               >
-                <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                Salir
               </button>
             )}
             <button
@@ -819,39 +874,59 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           </div>
         </div>
 
-        {/* Not Authenticated: PIN Prompt */}
-        {!isAuthenticated ? (
-          <div className="p-8 sm:p-12 text-center max-w-md mx-auto my-auto">
+        {/* Not Authenticated: Login Prompt or Initial Checking */}
+        {isCheckingAuth ? (
+          <div className="p-12 text-center max-w-md mx-auto my-auto w-full">
+            <RefreshCw className="w-8 h-8 animate-spin mx-auto text-[#8E4455] mb-3" />
+            <p className="text-xs text-[#7A6B62]">Verificando sesión...</p>
+          </div>
+        ) : !isAuthenticated ? (
+          <div className="p-8 sm:p-12 text-center max-w-md mx-auto my-auto w-full">
             <div className="w-16 h-16 rounded-full bg-[#FAF7F2] text-[#8E4455] border border-[#E8DCD5] flex items-center justify-center mx-auto mb-6">
               <Lock className="w-7 h-7" />
             </div>
             <h4 className="font-serif text-2xl font-medium text-[#241E1A] mb-2">
-              Acceso Exclusivo del Estudio
+              Acceso Administrativo · Gwen Nails
             </h4>
             <p className="text-xs text-[#7A6B62] mb-6">
-              Ingresá el PIN de seguridad de 4 dígitos para acceder a la gestión de turnos. (Por defecto: <strong>1234</strong>)
+              Ingresá tu usuario y contraseña asignados para acceder al sistema.
             </p>
 
-            <form onSubmit={handlePinSubmit} className="space-y-4">
-              <input
-                type="password"
-                maxLength={8}
-                value={pinInput}
-                onChange={(e) => setPinInput(e.target.value)}
-                placeholder="Ingresar PIN"
-                className="w-full text-center tracking-[0.5em] text-2xl font-bold py-3 px-4 rounded-xl bg-[#FAF7F2] border border-[#D9C9BF] text-[#241E1A] focus:outline-none focus:border-[#8E4455]"
-                autoFocus
-              />
+            <form onSubmit={handleLoginSubmit} className="space-y-4 text-left">
+              <div>
+                <label className="block text-xs font-medium text-[#4A3E39] mb-1">Usuario o Email</label>
+                <input
+                  type="text"
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value)}
+                  placeholder="admin o email@gwennails.com"
+                  className="w-full py-2.5 px-4 rounded-xl bg-[#FAF7F2] border border-[#D9C9BF] text-[#241E1A] text-sm focus:outline-none focus:border-[#8E4455]"
+                  required
+                  autoFocus
+                />
+              </div>
 
-              {pinError && (
-                <p className="text-xs text-rose-600 font-medium">{pinError}</p>
+              <div>
+                <label className="block text-xs font-medium text-[#4A3E39] mb-1">Contraseña</label>
+                <input
+                  type="password"
+                  value={passwordInput}
+                  onChange={(e) => setPasswordInput(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full py-2.5 px-4 rounded-xl bg-[#FAF7F2] border border-[#D9C9BF] text-[#241E1A] text-sm focus:outline-none focus:border-[#8E4455]"
+                  required
+                />
+              </div>
+
+              {loginError && (
+                <p className="text-xs text-rose-600 font-medium text-center">{loginError}</p>
               )}
 
               <button
                 type="submit"
-                className="w-full py-3 px-4 rounded-xl bg-[#8E4455] text-white text-sm font-medium hover:bg-[#783645] transition-all cursor-pointer"
+                className="w-full py-3 px-4 rounded-xl bg-[#8E4455] text-white text-sm font-medium hover:bg-[#783645] transition-all cursor-pointer mt-2"
               >
-                Desbloquear Panel
+                Iniciar Sesión
               </button>
             </form>
           </div>
@@ -943,6 +1018,30 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               >
                 <Tag className="w-3.5 h-3.5" />
                 <span>Promociones</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('plantillas-beneficios')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 cursor-pointer ${
+                  activeTab === 'plantillas-beneficios'
+                    ? 'bg-[#8E4455] text-white shadow-xs'
+                    : 'text-[#5A4B43] hover:bg-[#FAF7F2]'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Tipos de Beneficio</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('beneficios')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 cursor-pointer ${
+                  activeTab === 'beneficios'
+                    ? 'bg-[#8E4455] text-white shadow-xs'
+                    : 'text-[#5A4B43] hover:bg-[#FAF7F2]'
+                }`}
+              >
+                <Gift className="w-3.5 h-3.5" />
+                <span>Beneficios</span>
               </button>
 
               <button
@@ -1228,7 +1327,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                 <div className="flex items-center justify-between text-[#5A4B43]">
                                   <span className="flex items-center gap-1 font-semibold text-[#8E4455]">
                                     <CalendarIcon className="w-3.5 h-3.5" />
-                                    {apt.fecha}
+                                    {isoDateToAR(apt.fecha)}
                                   </span>
                                   <span className="flex items-center gap-1 font-semibold text-[#241E1A]">
                                     <Clock className="w-3.5 h-3.5" />
@@ -1363,7 +1462,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                   </div>
                                   {apt.canceladoEn && (
                                     <div className="text-[10px] text-rose-700/80">
-                                      {new Date(apt.canceladoEn).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' })}
+                                      {formatDateTimeAR(apt.canceladoEn)}
                                       {apt.canceladoPor && ` · ${apt.canceladoPor}`}
                                     </div>
                                   )}
@@ -1644,7 +1743,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                 onClick={() => {
                                   const tomorrow = new Date();
                                   tomorrow.setDate(tomorrow.getDate() + 1);
-                                  setManualForm(prev => ({ ...prev, fecha: tomorrow.toISOString().split('T')[0] }));
+                                  setManualForm(prev => ({ ...prev, fecha: getBusinessDate(tomorrow) }));
                                 }}
                                 className="text-[#8E4455] hover:underline font-medium"
                               >
@@ -2350,12 +2449,31 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 </div>
               )}
 
-              {/* TAB: PROMOCIONES Y BENEFICIOS */}
+              {/* TAB: PROMOCIONES */}
               {activeTab === 'promociones' && (
                 <PromotionsManagementAdmin
                   services={services}
                   clients={[]}
                   onRefreshData={loadAdminData}
+                  onAuthError={handleAuthError}
+                />
+              )}
+
+              {/* TAB: PLANTILLAS DE BENEFICIOS (CATÁLOGO REUTILIZABLE) */}
+              {activeTab === 'plantillas-beneficios' && (
+                <BenefitTemplatesAdmin
+                  services={services}
+                  onAuthError={handleAuthError}
+                />
+              )}
+
+              {/* TAB: BENEFICIOS INDIVIDUALES */}
+              {activeTab === 'beneficios' && (
+                <ClientBenefitsAdmin
+                  services={services}
+                  clients={[]}
+                  onRefreshData={loadAdminData}
+                  onAuthError={handleAuthError}
                 />
               )}
 
@@ -2449,7 +2567,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   Servicio: <strong>{appointmentToCancel.servicioNombre}</strong>
                 </p>
                 <p>
-                  Fecha y Hora: <strong>{appointmentToCancel.fecha} a las {appointmentToCancel.horaInicio} hs</strong>
+                  Fecha y Hora: <strong>{isoDateToAR(appointmentToCancel.fecha)} a las {appointmentToCancel.horaInicio} hs</strong>
                 </p>
                 <p className="text-[#8E4455] font-medium pt-1">
                   ℹ️ El turno pasará a estado <strong>CANCELADO</strong>, se liberará el horario en la agenda y se enviará la notificación por email a la clienta.
@@ -2552,7 +2670,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   Servicio: <strong>{appointmentToDelete.servicioNombre}</strong>
                 </p>
                 <p>
-                  Fecha y Hora: <strong>{appointmentToDelete.fecha} a las {appointmentToDelete.horaInicio} hs</strong>
+                  Fecha y Hora: <strong>{isoDateToAR(appointmentToDelete.fecha)} a las {appointmentToDelete.horaInicio} hs</strong>
                 </p>
                 <p className="text-rose-700 font-semibold pt-1">
                   ⚠️ Esta acción borrará el registro de la base de datos de manera permanente e irreversible.

@@ -93,8 +93,8 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
     setErrorMsg(null);
     try {
       const [profRes, usersRes] = await Promise.all([
-        fetch('/api/profesionales?all=true'),
-        fetch('/api/users')
+        fetch('/api/profesionales?all=true', { credentials: 'include' }),
+        fetch('/api/users', { credentials: 'include' })
       ]);
 
       if (profRes.ok) {
@@ -149,7 +149,7 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
 
     // Fetch this professional's enabled services
     try {
-      const sRes = await fetch(`/api/profesionales/${prof.id}/servicios`);
+      const sRes = await fetch(`/api/profesionales/${prof.id}/servicios`, { credentials: 'include' });
       if (sRes.ok) {
         const profServices: Service[] = await sRes.json();
         setFormServiciosIds(profServices.map(s => s.id));
@@ -222,6 +222,7 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
         const res = await fetch(`/api/profesionales/${editingProf.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify(profPayload)
         });
 
@@ -235,6 +236,7 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
         const res = await fetch('/api/profesionales', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify(profPayload)
         });
 
@@ -253,6 +255,7 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
           await fetch(`/api/users/${existingUser.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
               rol: formUserRole,
               nombre: `${formNombre.trim()} ${formApellido.trim()}`,
@@ -266,6 +269,7 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
           await fetch('/api/users', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
               email: formEmail.trim(),
               password: formUserPassword.trim(),
@@ -301,6 +305,7 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
       const res = await fetch(`/api/profesionales/${prof.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ activo: !prof.activo })
       });
       if (res.ok) {
@@ -343,7 +348,7 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
 
     try {
       if (action === 'delete') {
-        const res = await fetch(`/api/profesionales/${prof.id}`, { method: 'DELETE' });
+        const res = await fetch(`/api/profesionales/${prof.id}`, { method: 'DELETE', credentials: 'include' });
         if (res.ok) {
           setSuccessMsg(`Profesional "${prof.nombre} ${prof.apellido}" eliminada definitivamente.`);
         } else {
@@ -355,6 +360,7 @@ export const ProfessionalManagementAdmin: React.FC<ProfessionalManagementAdminPr
         await fetch(`/api/profesionales/${prof.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({ activo: false })
         });
         setSuccessMsg(`Profesional "${prof.nombre} ${prof.apellido}" desactivada correctamente. Sus turnos históricos se mantienen intactos.`);

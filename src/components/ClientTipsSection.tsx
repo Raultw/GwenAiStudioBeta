@@ -182,6 +182,7 @@ export const ClientTipsSection: React.FC<ClientTipsSectionProps> = ({
       await fetch(`/api/clientes/${clientId}/tips`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ tips: itemsToSave })
       });
       onTipsUpdated();
@@ -228,6 +229,7 @@ export const ClientTipsSection: React.FC<ClientTipsSectionProps> = ({
       await fetch(`/api/clientes/${clientId}/tips`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ tips: itemsToSave })
       });
       onTipsUpdated();
@@ -299,6 +301,7 @@ export const ClientTipsSection: React.FC<ClientTipsSectionProps> = ({
       const res = await fetch(`/api/clientes/${clientId}/tips`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ tips: itemsToSave })
       });
 

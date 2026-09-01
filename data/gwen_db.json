@@ -127,118 +127,11 @@
       "activo": true
     }
   ],
-  "appointments": [
-    {
-      "id": "apt-1787324976705-715",
-      "codigo": "GWEN-3677",
-      "nombre": "Valeria",
-      "apellido": "Rossi",
-      "telefono": "1199887766",
-      "servicioId": "3",
-      "servicioNombre": "Soft Gel System",
-      "duracionMinutos": 90,
-      "precio": 26000,
-      "fecha": "2026-08-25",
-      "horaInicio": "14:00",
-      "horaFin": "15:30",
-      "observaciones": "Prueba Soft Gel",
-      "estado": "confirmado",
-      "createdAt": "2026-08-21T15:09:36.705Z",
-      "updatedAt": "2026-08-21T15:09:36.705Z"
-    },
-    {
-      "id": "apt-1787322960015-395",
-      "codigo": "GWEN-6953",
-      "nombre": "Luciana",
-      "apellido": "García",
-      "telefono": "11-9876-5432",
-      "servicioId": "3",
-      "servicioNombre": "Soft Gel System",
-      "duracionMinutos": 90,
-      "precio": 26000,
-      "fecha": "2026-08-25",
-      "horaInicio": "10:00",
-      "horaFin": "11:30",
-      "observaciones": "Soft gel almendrado",
-      "estado": "confirmado",
-      "createdAt": "2026-08-21T14:36:00.015Z",
-      "updatedAt": "2026-08-21T14:36:00.015Z"
-    },
-    {
-      "id": "apt-1",
-      "codigo": "GWEN-4821",
-      "nombre": "Camila",
-      "apellido": "Valenzuela",
-      "telefono": "11-4521-8899",
-      "email": "camila.v@gmail.com",
-      "servicioId": "3",
-      "servicioNombre": "Soft Gel System",
-      "duracionMinutos": 90,
-      "precio": 26000,
-      "fecha": "2026-08-21",
-      "horaInicio": "10:00",
-      "horaFin": "11:30",
-      "observaciones": "Diseño almendrado con foil oro",
-      "estado": "confirmado",
-      "createdAt": "2026-08-19T14:35:53.378Z",
-      "updatedAt": "2026-08-20T14:35:53.379Z",
-      "notasAdmin": "Clienta habitual. Prefiere base tono nude claro."
-    },
-    {
-      "id": "apt-2",
-      "codigo": "GWEN-5912",
-      "nombre": "Florencia",
-      "apellido": "Méndez",
-      "telefono": "11-6677-4433",
-      "servicioId": "2",
-      "servicioNombre": "Esmaltado Semipermanente",
-      "duracionMinutos": 60,
-      "precio": 18000,
-      "fecha": "2026-08-21",
-      "horaInicio": "14:30",
-      "horaFin": "15:30",
-      "observaciones": "Color cherry red / bordeaux",
-      "estado": "pendiente",
-      "createdAt": "2026-08-21T14:35:53.379Z",
-      "updatedAt": "2026-08-21T14:35:53.379Z"
-    },
-    {
-      "id": "apt-3",
-      "codigo": "GWEN-6240",
-      "nombre": "Julieta",
-      "apellido": "Pérez",
-      "telefono": "11-3322-1100",
-      "servicioId": "5",
-      "servicioNombre": "Nail Art & Diseños Exclusivos",
-      "duracionMinutos": 90,
-      "precio": 25000,
-      "fecha": "2026-08-22",
-      "horaInicio": "11:00",
-      "horaFin": "12:30",
-      "observaciones": "Vanilla Chrome + micro flores",
-      "estado": "confirmado",
-      "createdAt": "2026-08-21T14:35:53.379Z",
-      "updatedAt": "2026-08-21T14:35:53.379Z"
-    },
-    {
-      "id": "apt-4",
-      "codigo": "GWEN-7719",
-      "nombre": "Martina",
-      "apellido": "Suárez",
-      "telefono": "11-8899-2211",
-      "servicioId": "4",
-      "servicioNombre": "Kapping Gel Fortalecedor",
-      "duracionMinutos": 75,
-      "precio": 22000,
-      "fecha": "2026-08-23",
-      "horaInicio": "16:00",
-      "horaFin": "17:15",
-      "observaciones": "Uñas frágiles post acrílico",
-      "estado": "confirmado",
-      "createdAt": "2026-08-21T14:35:53.379Z",
-      "updatedAt": "2026-08-21T14:35:53.379Z"
-    }
-  ],
+  "appointments": [],
+  "clients": [],
+  "clientAlerts": [],
+  "clientPreferences": [],
+  "clientTipsConfig": [],
   "config": {
     "nombreEstudio": "Gwen Nails Studio",
     "subtitulo": "Donde tus manos cuentan tu historia",
@@ -286,8 +179,427 @@
     },
     "intervaloMinutos": 30,
     "bufferMinutos": 0,
-    "diasBloqueados": [],
-    "horariosBloqueados": {},
-    "pinAdmin": "1234"
-  }
+    "pinAdmin": "1234",
+    "diasInactividadCliente": 60,
+    "minTurnosRecurrente": 2
+  },
+  "users": [
+    {
+      "id": "ac035356-5ca3-4464-a4a4-71495cc93b7b",
+      "username": "recov_sup",
+      "email": "recov_sup@gwennails.local",
+      "passwordHash": "120521fd6dd2640b92dd7523506705a0d71bcda1b5714320904e51346ffa641d919ab9b20e3028282cffc4eebfa7f532c7d1128b6284fbb58b19d46002168fbb",
+      "salt": "3a8617cf6db9581041c68c7eec8858b9",
+      "rol": "superadmin",
+      "activo": true,
+      "mustChangePassword": true,
+      "createdAt": "2026-09-01T19:03:01.922Z",
+      "updatedAt": "2026-09-01T19:03:01.922Z",
+      "password": "RecoverSecure123!"
+    }
+  ],
+  "professionals": [
+    {
+      "id": "prof-default-1",
+      "nombre": "Gwen",
+      "apellido": "Nails",
+      "email": "contacto@gwennails.com",
+      "telefono": "011-15682386",
+      "fotoUrl": "",
+      "colorAgenda": "#8E4455",
+      "titulo": "Master Nail Artist & Fundadora",
+      "activo": true,
+      "serviciosIds": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7"
+      ],
+      "createdAt": "2026-09-01T18:37:44.086Z",
+      "updatedAt": "2026-09-01T18:37:44.086Z"
+    }
+  ],
+  "professionalServices": [
+    {
+      "id": "ps-prof-default-1-1",
+      "profesionalId": "prof-default-1",
+      "servicioId": "1",
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "ps-prof-default-1-2",
+      "profesionalId": "prof-default-1",
+      "servicioId": "2",
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "ps-prof-default-1-3",
+      "profesionalId": "prof-default-1",
+      "servicioId": "3",
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "ps-prof-default-1-4",
+      "profesionalId": "prof-default-1",
+      "servicioId": "4",
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "ps-prof-default-1-5",
+      "profesionalId": "prof-default-1",
+      "servicioId": "5",
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "ps-prof-default-1-6",
+      "profesionalId": "prof-default-1",
+      "servicioId": "6",
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "ps-prof-default-1-7",
+      "profesionalId": "prof-default-1",
+      "servicioId": "7",
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z"
+    }
+  ],
+  "schedules": [
+    {
+      "id": "sched-local-default",
+      "alcance": "local",
+      "fechaVigencia": "2020-01-01",
+      "dias": {
+        "lunes": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "martes": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "miercoles": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "jueves": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "viernes": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "sabado": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "17:00"
+            }
+          ]
+        },
+        "domingo": {
+          "abierto": false,
+          "intervalos": []
+        }
+      },
+      "createdAt": "2026-09-01T18:37:44.086Z",
+      "updatedAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "sched-prof-default-1",
+      "alcance": "profesional",
+      "profesionalId": "prof-default-1",
+      "fechaVigencia": "2020-01-01",
+      "dias": {
+        "lunes": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "martes": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "miercoles": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "jueves": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "viernes": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "19:00"
+            }
+          ]
+        },
+        "sabado": {
+          "abierto": true,
+          "intervalos": [
+            {
+              "inicio": "09:00",
+              "fin": "17:00"
+            }
+          ]
+        },
+        "domingo": {
+          "abierto": false,
+          "intervalos": []
+        }
+      },
+      "createdAt": "2026-09-01T18:37:44.086Z",
+      "updatedAt": "2026-09-01T18:37:44.086Z"
+    }
+  ],
+  "availabilityExceptions": [],
+  "notificationLogs": [],
+  "promotions": [
+    {
+      "id": "promo-bienvenida-15",
+      "codigo": "BIENVENIDA15",
+      "nombre": "15% OFF Primera Visita",
+      "descripcion": "Descuento de bienvenida aplicable a todos los servicios para nuevas clientas.",
+      "activo": true,
+      "tipoDescuento": "porcentaje",
+      "valorDescuento": 15,
+      "fechaInicio": "2025-01-01",
+      "fechaVencimiento": null,
+      "limiteTotalUsos": null,
+      "limiteUsoPorCliente": 1,
+      "periodoReutilizacionDias": null,
+      "serviciosAplicables": [
+        "todos"
+      ],
+      "montoMinimo": null,
+      "usosActuales": 0,
+      "createdAt": "2026-09-01T18:37:44.086Z",
+      "updatedAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "promo-softgel-3000",
+      "codigo": "SOFTGEL3000",
+      "nombre": "$3.000 OFF en Soft Gel System",
+      "descripcion": "Descuento de $3.000 aplicable al servicio estrella de extensiones Soft Gel.",
+      "activo": true,
+      "tipoDescuento": "monto_fijo",
+      "valorDescuento": 3000,
+      "fechaInicio": "2025-01-01",
+      "fechaVencimiento": null,
+      "limiteTotalUsos": 50,
+      "limiteUsoPorCliente": 2,
+      "periodoReutilizacionDias": 30,
+      "serviciosAplicables": [
+        "3"
+      ],
+      "montoMinimo": 20000,
+      "usosActuales": 0,
+      "createdAt": "2026-09-01T18:37:44.086Z",
+      "updatedAt": "2026-09-01T18:37:44.086Z"
+    }
+  ],
+  "promotionUsages": [],
+  "clientBenefits": [],
+  "benefitTemplates": [
+    {
+      "id": "template-comp-20",
+      "nombrePublico": "20% de descuento en tu próxima visita",
+      "descripcionPublica": "Descuento de cortesía para tu próxima cita",
+      "tipoDescuento": "porcentaje",
+      "valorDescuento": 20,
+      "vigenciaDias": 30,
+      "serviciosAplicables": [
+        "todos"
+      ],
+      "montoMinimo": null,
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z",
+      "updatedAt": "2026-09-01T18:37:44.086Z"
+    },
+    {
+      "id": "template-comp-5000",
+      "nombrePublico": "$5.000 de descuento en tu próxima visita",
+      "descripcionPublica": "Monto fijo de compensación para tu próxima cita",
+      "tipoDescuento": "monto_fijo",
+      "valorDescuento": 5000,
+      "vigenciaDias": 60,
+      "serviciosAplicables": [
+        "todos"
+      ],
+      "montoMinimo": null,
+      "activo": true,
+      "createdAt": "2026-09-01T18:37:44.086Z",
+      "updatedAt": "2026-09-01T18:37:44.086Z"
+    }
+  ],
+  "sessions": [
+    {
+      "id": "sess-1788289380927-b60cb780",
+      "tokenHash": "b72aa8fc92f1f47816af6c1b56f2f0d59440f061e7511e28c2e280be70987efa",
+      "userId": "a18579bf-f23b-438b-abf7-9e4c6a1198e2",
+      "createdAt": "2026-09-01T19:03:00.927Z",
+      "expiresAt": "2026-09-02T19:03:00.927Z",
+      "revokedAt": null,
+      "lastActivityAt": "2026-09-01T19:03:00.928Z"
+    },
+    {
+      "id": "sess-1788289380974-9f94d1b6",
+      "tokenHash": "506afbb72ccde60f8e7fa45f449f19eab3f08432057a216997814261ecd816d2",
+      "userId": "01dd4426-fd0c-4ac3-b337-7c41101b5d0e",
+      "createdAt": "2026-09-01T19:03:00.974Z",
+      "expiresAt": "2026-09-02T19:03:00.974Z",
+      "revokedAt": null,
+      "lastActivityAt": "2026-09-01T19:03:00.974Z"
+    },
+    {
+      "id": "sess-1788289381019-a69d83af",
+      "tokenHash": "81c6f2643b84149e54cc02b9d44814f7c64a2a93ae951cc43d08a020aac23fe0",
+      "userId": "7f35633d-3d01-49d3-b649-e1ee6111c049",
+      "createdAt": "2026-09-01T19:03:01.019Z",
+      "expiresAt": "2026-09-02T19:03:01.019Z",
+      "revokedAt": "2026-09-01T19:03:01.019Z",
+      "lastActivityAt": "2026-09-01T19:03:01.019Z"
+    },
+    {
+      "id": "sess-1788289381065-2db58c01",
+      "tokenHash": "639c06c7977cccb8996b7a616e62ffa41abb000157931a45036d325a1d710ed4",
+      "userId": "8287c9f5-1916-4c63-894f-3969dd0e0432",
+      "createdAt": "2026-09-01T19:03:01.065Z",
+      "expiresAt": "2026-09-02T19:03:01.065Z",
+      "revokedAt": "2026-09-01T19:03:01.065Z",
+      "lastActivityAt": "2026-09-01T19:03:01.065Z"
+    },
+    {
+      "id": "sess-1788289381110-6f7492bc",
+      "tokenHash": "371b18b8446a37e6d0b8640b88c86af154895ff9a2c3224412570c54c22baa69",
+      "userId": "06e7730a-c2dd-4548-9a80-5a9d6c300dcd",
+      "createdAt": "2026-09-01T19:03:01.110Z",
+      "expiresAt": "2026-09-02T19:03:01.110Z",
+      "revokedAt": null,
+      "lastActivityAt": "2026-09-01T19:03:01.110Z"
+    },
+    {
+      "id": "sess-1788289381203-fa620132",
+      "tokenHash": "53090b750f943aa0677b8e8cf8ccbae5c8359f4697844cc693714c98e2c129c8",
+      "userId": "a1a96ecf-8e2d-403e-8a2d-a81ef44b2223",
+      "createdAt": "2026-09-01T19:03:01.203Z",
+      "expiresAt": "2026-09-02T19:03:01.203Z",
+      "revokedAt": null,
+      "lastActivityAt": "2026-09-01T19:03:01.203Z"
+    },
+    {
+      "id": "sess-1788289381204-979621fb",
+      "tokenHash": "bfe24153b648625dfedae0664fd3ccf799ab11356c27424240d97a54b5259772",
+      "userId": "a1a96ecf-8e2d-403e-8a2d-a81ef44b2223",
+      "createdAt": "2026-09-01T19:03:01.204Z",
+      "expiresAt": "2026-09-02T19:03:01.204Z",
+      "revokedAt": null,
+      "lastActivityAt": "2026-09-01T19:03:01.204Z"
+    }
+  ],
+  "auditLogs": [
+    {
+      "id": "audit-1788289380880-eb7012",
+      "evento": "superadmin_bootstrapped",
+      "fecha": "2026-09-01T19:03:00.880Z",
+      "origen": "sistema",
+      "metadata": {
+        "username": "concboot"
+      }
+    },
+    {
+      "id": "audit-1788289381606-532c6f",
+      "actorId": "e9d197a0-0bd2-45ea-8c82-fff1ccb42e74",
+      "actorName": "adm1",
+      "targetUserId": "292c2a1d-744b-4126-974b-d23fcfc72a5c",
+      "evento": "admin_password_reset",
+      "fecha": "2026-09-01T19:03:01.606Z",
+      "origen": "sistema",
+      "metadata": {
+        "targetUserId": "292c2a1d-744b-4126-974b-d23fcfc72a5c"
+      }
+    },
+    {
+      "id": "audit-1788289381748-ff4a5d",
+      "actorId": "6dc276d5-5e40-4a2e-80fb-f82c7ed371f5",
+      "actorName": "sup_master",
+      "targetUserId": "07d8f3d7-111f-4215-809c-f05577ddc9d6",
+      "evento": "admin_password_reset",
+      "fecha": "2026-09-01T19:03:01.748Z",
+      "origen": "sistema",
+      "metadata": {
+        "targetUserId": "07d8f3d7-111f-4215-809c-f05577ddc9d6"
+      }
+    },
+    {
+      "id": "audit-1788289381877-23b7c2",
+      "actorId": "ece19de8-8693-4d36-9113-9a2b81317112",
+      "actorName": "sup_master2",
+      "targetUserId": "f023a8fc-d4f1-44f0-8b34-e2b069401ffe",
+      "evento": "admin_password_reset",
+      "fecha": "2026-09-01T19:03:01.877Z",
+      "origen": "sistema",
+      "metadata": {
+        "targetUserId": "f023a8fc-d4f1-44f0-8b34-e2b069401ffe"
+      }
+    }
+  ]
 }

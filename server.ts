@@ -11,7 +11,10 @@ import type {
   ScheduleScope,
   AvailabilityExceptionType,
   TimeInterval,
-  WeekScheduleMap
+  WeekScheduleMap,
+  ClientBenefit,
+  BenefitTemplate,
+  UpdateBenefitResult
 } from "./src/types.js";
 import {
   initDatabase,
@@ -61,6 +64,7 @@ import {
   updateUser,
   deleteUser,
   authenticateUser,
+  adminResetPassword,
   getSchedules,
   getScheduleForDate,
   saveSchedule,
@@ -81,11 +85,25 @@ import {
   validatePromotion,
   getClientBenefits,
   getAvailableClientBenefits,
+  getClientBenefitById,
+  normalizeBenefitOrigin,
   createClientBenefit,
   updateClientBenefit,
   validateClientBenefit,
-  grantCompensationBenefitForCancelledAppointment
+  grantCompensationBenefitForCancelledAppointment,
+  getBenefitTemplates,
+  getBenefitTemplateById,
+  createBenefitTemplate,
+  updateBenefitTemplate,
+  toggleBenefitTemplateActive,
+  createSession,
+  revokeSessionByToken,
+  verifyPassword,
+  validatePasswordPolicy,
+  revokeAllUserSessions,
+  createAuditLog
 } from "./src/server/db.js";
+import { getBusinessDate, isoDateToAR } from "./src/utils/dateUtils.js";
 import { notificationService } from "./src/server/notifications/notificationService.js";
 import {
   calculateAvailability,
@@ -96,21 +114,44 @@ import {
   timeToMinutes,
   minutesToTime
 } from "./src/server/availabilityEngine.js";
+import cookieParser from "cookie-parser";
+import {
+  requireAuth,
+  requireAdmin,
+  requireAdminOrProfessional,
+  enforceProfessionalScope,
+  authRateLimiter,
+  bookingRateLimiter,
+  csrfProtection,
+  SESSION_COOKIE_NAME,
+  SESSION_COOKIE_OPTIONS
+} from "./src/server/authMiddleware.js";
 
 const app = express();
 const PORT = 3000;
 
-// Enable CORS and JSON body parser
-app.use(cors());
-app.use(express.json());
+app.set('trust proxy', 1);
 
-// Helper: Format Date to YYYY-MM-DD
+// Security and Parsers Middleware
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
+app.use(express.json());
+app.use(cookieParser());
+app.use(csrfProtection);
+
+// Security Headers
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  next();
+});
+
+// Helper: Format Date to YYYY-MM-DD in Argentina business timezone
 function getTodayIso(): string {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return getBusinessDate();
 }
 
 const dayKeys = ["domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado"] as const;
@@ -225,9 +266,74 @@ app.get("/api/availability", async (req, res) => {
   }
 });
 
-// 6. POST /api/turnos (Booking creation with server-side validation & engine checks)
-app.post("/api/turnos", async (req, res) => {
+// Helper for strict No-Stacking discount validation
+export function checkDiscountNoStacking(body: any): { hasConflict: boolean; hasPromotion: boolean; hasClientBenefit: boolean; error?: string } {
+  if (!body || typeof body !== "object") {
+    return { hasConflict: false, hasPromotion: false, hasClientBenefit: false };
+  }
+
+  const promoCodeRaw = body.descuentoCodigo ?? body.descuento_codigo ?? body.codigoPromocion ?? body.codigo_promocion ?? body.codigoPromo ?? body.codigo_promo ?? body.promoCode ?? body.codigo;
+  const promoIdRaw = body.promocionId ?? body.promocion_id ?? body.promotionId ?? body.promotion_id;
+  const benefitIdRaw = body.clientBenefitId ?? body.client_benefit_id ?? body.beneficioId ?? body.beneficio_id ?? body.benefitId ?? body.benefit_id;
+  
+  const cleanPromoCode = typeof promoCodeRaw === 'string' ? promoCodeRaw.trim() : '';
+  const cleanPromoId = typeof promoIdRaw === 'string' ? promoIdRaw.trim() : '';
+  const cleanBenefitId = typeof benefitIdRaw === 'string' ? benefitIdRaw.trim() : '';
+  const cleanDiscountId = typeof body.descuentoId === 'string' ? body.descuentoId.trim() : (typeof body.descuento_id === 'string' ? body.descuento_id.trim() : '');
+  const tipo = body.descuentoTipo ? String(body.descuentoTipo).trim().toLowerCase() : (body.descuento_tipo ? String(body.descuento_tipo).trim().toLowerCase() : '');
+
+  const hasExplicitPromo = cleanPromoCode.length > 0 || cleanPromoId.length > 0 || tipo === 'promocion';
+  const hasExplicitBenefit = cleanBenefitId.length > 0 || tipo === 'beneficio';
+
+  const hasPromotion = cleanPromoCode.length > 0 || cleanPromoId.length > 0 || (tipo === 'promocion' && cleanDiscountId.length > 0);
+  let hasClientBenefit = cleanBenefitId.length > 0 || (tipo === 'beneficio' && cleanDiscountId.length > 0);
+
+  if (cleanDiscountId.length > 0 && !hasPromotion && !hasClientBenefit && tipo !== 'promocion') {
+    hasClientBenefit = true;
+  }
+
+  if (hasExplicitPromo && hasExplicitBenefit) {
+    return {
+      hasConflict: true,
+      hasPromotion: true,
+      hasClientBenefit: true,
+      error: "No se puede aplicar una promoción y un beneficio individual en la misma reserva."
+    };
+  }
+
+  if (hasPromotion && hasClientBenefit) {
+    return {
+      hasConflict: true,
+      hasPromotion: true,
+      hasClientBenefit: true,
+      error: "No se puede aplicar una promoción y un beneficio individual en la misma reserva."
+    };
+  }
+
+  if (cleanPromoCode.length > 0 && (cleanBenefitId.length > 0 || (cleanDiscountId.length > 0 && tipo === 'beneficio'))) {
+    return {
+      hasConflict: true,
+      hasPromotion: true,
+      hasClientBenefit: true,
+      error: "No se puede aplicar una promoción y un beneficio individual en la misma reserva."
+    };
+  }
+
+  return { hasConflict: false, hasPromotion, hasClientBenefit };
+}
+
+// 6. POST /api/turnos & POST /api/appointments (Booking creation with server-side validation & engine checks)
+app.post(["/api/turnos", "/api/appointments"], async (req, res) => {
   try {
+    // Explicit No-Stacking validation: reject requests attempting to apply both promotion and client benefit
+    const discountConflictCheck = checkDiscountNoStacking(req.body);
+    if (discountConflictCheck.hasConflict) {
+      res.status(400).json({
+        error: discountConflictCheck.error || "No se puede aplicar una promoción y un beneficio individual en la misma reserva."
+      });
+      return;
+    }
+
     const { 
       nombre, 
       apellido, 
@@ -244,7 +350,10 @@ app.post("/api/turnos", async (req, res) => {
       browserId,
       descuentoTipo,
       descuentoId,
-      descuentoCodigo
+      descuentoCodigo,
+      descuento_tipo,
+      descuento_id,
+      descuento_codigo
     } = req.body;
 
     const sId = String(servicio_id || servicioId || "");
@@ -289,6 +398,12 @@ app.post("/api/turnos", async (req, res) => {
     const codeNumber = Math.floor(1000 + Math.random() * 9000);
     const bookingCode = `GWEN-${codeNumber}`;
 
+    const rawPromoCode = descuentoCodigo ?? descuento_codigo ?? req.body.codigoPromocion ?? req.body.codigo_promocion ?? req.body.codigoPromo ?? req.body.promoCode ?? (discountConflictCheck.hasPromotion ? req.body.codigo : undefined);
+    const resolvedDescuentoCodigo = typeof rawPromoCode === 'string' && rawPromoCode.trim().length > 0 ? rawPromoCode.trim() : undefined;
+    const rawDiscountId = descuentoId ?? descuento_id ?? req.body.clientBenefitId ?? req.body.client_benefit_id ?? req.body.beneficioId ?? req.body.beneficio_id ?? req.body.promocionId ?? req.body.promocion_id ?? req.body.promotionId;
+    const resolvedDescuentoId = typeof rawDiscountId === 'string' && rawDiscountId.trim().length > 0 ? rawDiscountId.trim() : undefined;
+    const resolvedDescuentoTipo = descuentoTipo || descuento_tipo || (resolvedDescuentoCodigo ? 'promocion' : (resolvedDescuentoId ? 'beneficio' : undefined));
+
     const newAppointment: Appointment = {
       id: `apt-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       clienteId: client.id,
@@ -305,9 +420,9 @@ app.post("/api/turnos", async (req, res) => {
       precio: validation.precio,
       precioOriginal: validation.precio,
       precioFinal: validation.precio,
-      descuentoTipo: descuentoTipo || undefined,
-      descuentoId: descuentoId || undefined,
-      descuentoCodigo: descuentoCodigo || undefined,
+      descuentoTipo: resolvedDescuentoTipo || undefined,
+      descuentoId: resolvedDescuentoId || undefined,
+      descuentoCodigo: resolvedDescuentoCodigo || undefined,
       fecha: targetFecha,
       horaInicio: targetHoraInicio,
       horaFin: validation.horaFin,
@@ -332,7 +447,7 @@ app.post("/api/turnos", async (req, res) => {
       `👤 *Nombre:* ${saved.nombre} ${saved.apellido}\n` +
       `💅 *Servicio:* ${saved.servicioNombre}\n` +
       (saved.profesionalNombre ? `👩‍🎨 *Profesional:* ${saved.profesionalNombre}\n` : "") +
-      `📅 *Fecha:* ${saved.fecha}\n` +
+      `📅 *Fecha:* ${isoDateToAR(saved.fecha)}\n` +
       `⏰ *Horario:* ${saved.horaInicio} hs (${saved.duracionMinutos} min)\n` +
       discountLine +
       `💰 *Total a abonar:* $${finalAmount.toLocaleString("es-AR")}\n` +
@@ -349,8 +464,35 @@ app.post("/api/turnos", async (req, res) => {
   } catch (error: any) {
     console.error("Error in POST /api/turnos:", error);
     const msg = error?.message || "Error al procesar la reserva";
-    const status = msg.includes("ya ha sido reservado") || msg.includes("concurrente") || msg.includes("simultánea") ? 409 : 500;
-    res.status(status).json({ error: msg });
+    const msgLow = msg.toLowerCase();
+    const isConflict = error?.code === '23505' ||
+                         msgLow.includes("ya ha sido reservado") ||
+                         msgLow.includes("concurrente") ||
+                         msgLow.includes("simultánea") ||
+                         msgLow.includes("simultanea") ||
+                         msgLow.includes("ocupado") ||
+                         msgLow.includes("solapamiento") ||
+                         msgLow.includes("duplicate key") ||
+                         msgLow.includes("idx_appointments_unique_slot");
+    const isValidation = msgLow.includes("no se puede aplicar") ||
+                         msgLow.includes("requiere un monto") ||
+                         msgLow.includes("código promocional") ||
+                         msgLow.includes("codigo promocional") ||
+                         msgLow.includes("promoción") ||
+                         msgLow.includes("promocion") ||
+                         msgLow.includes("beneficio") ||
+                         msgLow.includes("límite") ||
+                         msgLow.includes("limite") ||
+                         msgLow.includes("alcanzado") ||
+                         msgLow.includes("vencido") ||
+                         msgLow.includes("vigente") ||
+                         msgLow.includes("utilizado") ||
+                         msgLow.includes("obligatorios");
+    const status = isConflict ? 409 : (isValidation ? 400 : 500);
+    const userMessage = error?.code === '23505'
+      ? "El horario seleccionado ya ha sido reservado por otra solicitud simultánea. Por favor elegí otro horario."
+      : msg;
+    res.status(status).json({ error: userMessage });
   }
 });
 
@@ -766,38 +908,25 @@ app.put("/api/clientes/:id/tips", async (req, res) => {
 app.get("/api/config", async (req, res) => {
   try {
     const config = await getStudioConfig();
-    res.json(config);
+    const { pinAdmin: _, ...safeConfig } = config as any;
+    res.json(safeConfig);
   } catch (error) {
     console.error("Error in GET /api/config:", error);
     res.status(500).json({ error: "Error al obtener configuración" });
   }
 });
 
-app.put("/api/config", async (req, res) => {
+app.put("/api/config", requireAdmin, async (req, res) => {
   try {
     const updated = await updateStudioConfig(req.body);
-    res.json(updated);
+    const { pinAdmin: _, ...safeConfig } = updated as any;
+    res.json(safeConfig);
   } catch (error) {
     console.error("Error in PUT /api/config:", error);
     res.status(500).json({ error: "Error al actualizar configuración" });
   }
 });
 
-// 12. POST /api/admin/verify-pin
-app.post("/api/admin/verify-pin", async (req, res) => {
-  try {
-    const { pin } = req.body;
-    const config = await getStudioConfig();
-    if (pin === config.pinAdmin || pin === "1234" || pin === "gwen") {
-      res.json({ valid: true });
-    } else {
-      res.status(401).json({ valid: false, error: "PIN incorrecto" });
-    }
-  } catch (error) {
-    console.error("Error in POST /api/admin/verify-pin:", error);
-    res.status(500).json({ error: "Error al verificar PIN" });
-  }
-});
 
 // 13. POST /api/admin/bloquear-horario (Blocks a time range or whole day with collision detection -> unified as AvailabilityException)
 app.post("/api/admin/bloquear-horario", async (req, res) => {
@@ -1058,28 +1187,27 @@ app.put("/api/servicios/:id/profesionales", async (req, res) => {
 });
 
 // 22. POST /api/auth/login
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", authRateLimiter, async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      res.status(400).json({ error: "Email y contraseña requeridos" });
+    const { username, email, identifier, password } = req.body;
+    const loginId = identifier || username || email;
+    if (!loginId || !password) {
+      res.status(400).json({ error: "Usuario/email y contraseña requeridos" });
       return;
     }
-    const authResult = await authenticateUser(email, password);
+    const authResult = await authenticateUser(loginId, password);
     if (!authResult.success || !authResult.user) {
       res.status(401).json({ error: authResult.error || "Credenciales inválidas" });
       return;
     }
+
+    const { session, rawToken } = await createSession(authResult.user.id);
+    res.cookie(SESSION_COOKIE_NAME, rawToken, SESSION_COOKIE_OPTIONS);
+
     res.json({
       message: "Autenticación exitosa",
-      user: {
-        id: authResult.user.id,
-        email: authResult.user.email,
-        rol: authResult.user.rol,
-        profesionalId: authResult.user.profesionalId,
-        nombre: authResult.user.nombre,
-        activo: authResult.user.activo
-      }
+      user: authResult.user,
+      sessionId: session.id
     });
   } catch (error) {
     console.error("Error in POST /api/auth/login:", error);
@@ -1087,18 +1215,89 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-// 23. GET /api/users
-app.get("/api/users", async (req, res) => {
+// 22b. GET /api/auth/me
+app.get("/api/auth/me", requireAuth, async (req, res) => {
+  res.json({ user: req.user, session: req.session });
+});
+
+// 22c. POST /api/auth/password-change
+app.post("/api/auth/password-change", requireAuth, async (req, res) => {
   try {
-    const users = await getUsers();
-    // Do not return sensitive hashes
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      res.status(400).json({ error: "Contraseña actual y nueva contraseña requeridas" });
+      return;
+    }
+    const userId = req.user!.id;
+    const userFull = await getUserById(userId);
+    if (!userFull || !userFull.passwordHash || !userFull.salt) {
+      res.status(401).json({ error: "Usuario no válido" });
+      return;
+    }
+    const isValidCurrent = verifyPassword(currentPassword, userFull.salt, userFull.passwordHash);
+    if (!isValidCurrent) {
+      res.status(400).json({ error: "La contraseña actual es incorrecta" });
+      return;
+    }
+
+    const policyCheck = validatePasswordPolicy(newPassword);
+    if (!policyCheck.valid) {
+      res.status(400).json({ error: policyCheck.error });
+      return;
+    }
+
+    await updateUser(userId, {
+      password: newPassword,
+      mustChangePassword: false
+    });
+
+    await revokeAllUserSessions(userId);
+
+    await createAuditLog({
+      actorId: userId,
+      actorName: req.user!.nombre || req.user!.username,
+      targetUserId: userId,
+      evento: 'password_changed',
+      metadata: { userId }
+    });
+
+    res.json({ success: true, message: "Contraseña actualizada con éxito." });
+  } catch (error: any) {
+    console.error("Error in POST /api/auth/password-change:", error);
+    res.status(400).json({ error: error.message || "Error al actualizar contraseña" });
+  }
+});
+
+// 22c. POST /api/auth/logout
+app.post("/api/auth/logout", async (req, res) => {
+  try {
+    const token = req.cookies?.[SESSION_COOKIE_NAME] || 
+      (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7).trim() : null);
+    
+    if (token) {
+      await revokeSessionByToken(token);
+    }
+    res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+    res.json({ success: true, message: "Sesión cerrada correctamente" });
+  } catch (error) {
+    console.error("Error in POST /api/auth/logout:", error);
+    res.status(500).json({ error: "Error al cerrar sesión" });
+  }
+});
+
+// 23. GET /api/users (Admin)
+app.get("/api/users", requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers(false);
     const sanitized = users.map(u => ({
       id: u.id,
+      username: u.username,
       email: u.email,
       rol: u.rol,
       profesionalId: u.profesionalId,
       nombre: u.nombre,
       activo: u.activo,
+      mustChangePassword: u.mustChangePassword,
       createdAt: u.createdAt,
       updatedAt: u.updatedAt
     }));
@@ -1109,38 +1308,42 @@ app.get("/api/users", async (req, res) => {
   }
 });
 
-// 24. POST /api/users
-app.post("/api/users", async (req, res) => {
+// 24. POST /api/users (Admin)
+app.post("/api/users", requireAdmin, async (req, res) => {
   try {
-    const { email, password, rol, profesionalId, nombre, activo } = req.body;
-    if (!email || !password || !rol) {
-      res.status(400).json({ error: "Email, password y rol son obligatorios" });
+    const { username, email, password, rol, profesionalId, nombre, activo, mustChangePassword } = req.body;
+    if ((!username && !email) || !password || !rol) {
+      res.status(400).json({ error: "Username o email, password y rol son obligatorios" });
       return;
     }
     const created = await createUser({
+      username,
       email,
       password,
       rol,
       profesionalId,
       nombre,
-      activo: activo !== false
+      activo: activo !== false,
+      mustChangePassword: !!mustChangePassword
     });
     res.status(201).json({
       id: created.id,
+      username: created.username,
       email: created.email,
       rol: created.rol,
       profesionalId: created.profesionalId,
       nombre: created.nombre,
-      activo: created.activo
+      activo: created.activo,
+      mustChangePassword: created.mustChangePassword
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error in POST /api/users:", error);
-    res.status(500).json({ error: "Error al crear usuario" });
+    res.status(500).json({ error: error.message || "Error al crear usuario" });
   }
 });
 
-// 25. PUT /api/users/:id
-app.put("/api/users/:id", async (req, res) => {
+// 25. PUT /api/users/:id (Admin)
+app.put("/api/users/:id", requireAdmin, async (req, res) => {
   try {
     const updated = await updateUser(req.params.id, req.body);
     if (!updated) {
@@ -1149,20 +1352,44 @@ app.put("/api/users/:id", async (req, res) => {
     }
     res.json({
       id: updated.id,
+      username: updated.username,
       email: updated.email,
       rol: updated.rol,
       profesionalId: updated.profesionalId,
       nombre: updated.nombre,
-      activo: updated.activo
+      activo: updated.activo,
+      mustChangePassword: updated.mustChangePassword
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error in PUT /api/users/:id:", error);
-    res.status(500).json({ error: "Error al actualizar usuario" });
+    res.status(400).json({ error: error.message || "Error al actualizar usuario" });
   }
 });
 
-// 26. DELETE /api/users/:id
-app.delete("/api/users/:id", async (req, res) => {
+// 25b. POST /api/users/:id/reset-password (Admin)
+app.post("/api/users/:id/reset-password", requireAdmin, async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword) {
+      res.status(400).json({ error: "Nueva contraseña requerida" });
+      return;
+    }
+    const actorId = req.user?.id;
+    const actorName = req.user?.nombre || req.user?.username || 'Administrador';
+    const updated = await adminResetPassword(req.params.id, newPassword, actorId, actorName);
+    if (!updated) {
+      res.status(404).json({ error: "Usuario no encontrado" });
+      return;
+    }
+    res.json({ success: true, message: "Contraseña restablecida con éxito por administración" });
+  } catch (error: any) {
+    console.error("Error in POST /api/users/:id/reset-password:", error);
+    res.status(400).json({ error: error.message || "Error al restablecer contraseña" });
+  }
+});
+
+// 26. DELETE /api/users/:id (Admin)
+app.delete("/api/users/:id", requireAdmin, async (req, res) => {
   try {
     const deleted = await deleteUser(req.params.id);
     if (!deleted) {
@@ -1170,9 +1397,9 @@ app.delete("/api/users/:id", async (req, res) => {
       return;
     }
     res.json({ message: "Usuario eliminado con éxito" });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error in DELETE /api/users/:id:", error);
-    res.status(500).json({ error: "Error al eliminar usuario" });
+    res.status(400).json({ error: error.message || "Error al eliminar usuario" });
   }
 });
 
@@ -1284,7 +1511,21 @@ app.get("/api/excepciones-disponibilidad", async (req, res) => {
 // 32. POST /api/excepciones-disponibilidad
 app.post("/api/excepciones-disponibilidad", async (req, res) => {
   try {
-    const { alcance, profesionalId, profesionalIds, fecha, tipo, intervalos, motivo, forceCancelConflicts } = req.body;
+    const {
+      alcance,
+      profesionalId,
+      profesionalIds,
+      fecha,
+      tipo,
+      intervalos,
+      motivo,
+      forceCancelConflicts,
+      adjuntarBeneficio,
+      benefitTemplateId,
+      benefitAppointmentIds,
+      operationId
+    } = req.body;
+
     if (!alcance || !fecha || !tipo) {
       res.status(400).json({ error: "alcance, fecha y tipo son requeridos" });
       return;
@@ -1315,7 +1556,7 @@ app.post("/api/excepciones-disponibilidad", async (req, res) => {
     const canceladoPor = 'Sistema / Excepción de horarios';
 
     // 1. First correctly apply operation in database & confirm transaction
-    const { exceptions, cancelledAppointments } = await applyAvailabilityExceptionWithCancellations({
+    const result = await applyAvailabilityExceptionWithCancellations({
       alcance,
       profesionalId,
       profesionalIds,
@@ -1325,33 +1566,93 @@ app.post("/api/excepciones-disponibilidad", async (req, res) => {
       motivo,
       conflictAppointmentIds,
       cancelMotivo,
-      canceladoPor
+      canceladoPor,
+      adjuntarBeneficio,
+      benefitTemplateId,
+      benefitAppointmentIds,
+      operationId
     });
 
-    // 2. AFTER transaction is confirmed in DB, send notifications to each affected client
-    if (cancelledAppointments && cancelledAppointments.length > 0) {
+    const { exceptions, cancelledAppointments, issuedBenefits, appointmentResults } = result;
+
+    // 2. AFTER transaction is confirmed in DB, send notifications based on transactional analysis
+    if (appointmentResults && appointmentResults.length > 0) {
+      for (const resItem of appointmentResults) {
+        const apt = resItem.appointment;
+        if (resItem.shouldSendNotification && apt.email) {
+          try {
+            const idempotencyKey = operationId ? `exc-cancel-${apt.id}-${fecha}-${operationId}` : `exc-cancel-${apt.id}-${fecha}`;
+            const issuedBenefit = resItem.benefit || (issuedBenefits || []).find(b => b.turnoOrigenId === apt.id);
+            const beneficioSnapshot = issuedBenefit ? {
+              id: issuedBenefit.id,
+              titulo: issuedBenefit.titulo,
+              descripcion: issuedBenefit.descripcion,
+              tipoDescuento: issuedBenefit.tipoDescuento,
+              valorDescuento: issuedBenefit.valorDescuento,
+              fechaVencimiento: issuedBenefit.fechaVencimiento,
+              serviciosAplicables: issuedBenefit.serviciosAplicables,
+              montoMinimo: issuedBenefit.montoMinimo
+            } : undefined;
+
+            await notificationService.sendAppointmentCancellation(apt, {
+              motivo: cancelMotivo,
+              origen: 'excepcion_disponibilidad',
+              canceladoPor,
+              idempotencyKey,
+              beneficio: beneficioSnapshot
+            });
+          } catch (notifErr) {
+            console.error(`Error sending cancellation email for appointment ${apt.id}:`, notifErr);
+          }
+        }
+      }
+    } else if (cancelledAppointments && cancelledAppointments.length > 0) {
       for (const apt of cancelledAppointments) {
-        try {
-          const idempotencyKey = `exc-cancel-${apt.id}-${fecha}-${apt.canceladoEn || ''}`;
-          await notificationService.sendAppointmentCancellation(apt, {
-            motivo: cancelMotivo,
-            origen: 'excepcion_disponibilidad',
-            canceladoPor,
-            idempotencyKey
-          });
-        } catch (notifErr) {
-          console.error(`Error sending cancellation email for appointment ${apt.id}:`, notifErr);
+        if (apt.email) {
+          try {
+            const idempotencyKey = operationId ? `exc-cancel-${apt.id}-${fecha}-${operationId}` : `exc-cancel-${apt.id}-${fecha}`;
+            const issuedBenefit = (issuedBenefits || []).find(b => b.turnoOrigenId === apt.id);
+            const beneficioSnapshot = issuedBenefit ? {
+              id: issuedBenefit.id,
+              titulo: issuedBenefit.titulo,
+              descripcion: issuedBenefit.descripcion,
+              tipoDescuento: issuedBenefit.tipoDescuento,
+              valorDescuento: issuedBenefit.valorDescuento,
+              fechaVencimiento: issuedBenefit.fechaVencimiento,
+              serviciosAplicables: issuedBenefit.serviciosAplicables,
+              montoMinimo: issuedBenefit.montoMinimo
+            } : undefined;
+
+            await notificationService.sendAppointmentCancellation(apt, {
+              motivo: cancelMotivo,
+              origen: 'excepcion_disponibilidad',
+              canceladoPor,
+              idempotencyKey,
+              beneficio: beneficioSnapshot
+            });
+          } catch (notifErr) {
+            console.error(`Error sending cancellation email for appointment ${apt.id}:`, notifErr);
+          }
         }
       }
     }
 
     res.status(201).json({
       exceptions,
-      cancelledCount: cancelledAppointments.length
+      cancelledCount: cancelledAppointments.length,
+      issuedBenefitsCount: (issuedBenefits || []).length,
+      issuedBenefits: issuedBenefits || []
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error in POST /api/excepciones-disponibilidad:", error);
-    res.status(500).json({ error: "Error al crear excepción de disponibilidad" });
+    const msg = error?.message || "Error al crear excepción de disponibilidad";
+    let statusCode = 400;
+    if (msg.includes('no existe') || msg.includes('no fue encontrado')) {
+      statusCode = 404;
+    } else if (msg.includes('Existen turnos afectados')) {
+      statusCode = 409;
+    }
+    res.status(statusCode).json({ error: msg });
   }
 });
 
@@ -1630,6 +1931,21 @@ app.get("/api/beneficios-cliente/disponibles", async (req, res) => {
   }
 });
 
+// 44b. GET /api/beneficios-cliente/:id
+app.get("/api/beneficios-cliente/:id", async (req, res) => {
+  try {
+    const benefit = await getClientBenefitById(req.params.id);
+    if (!benefit) {
+      res.status(404).json({ error: "Beneficio no encontrado" });
+      return;
+    }
+    res.json(benefit);
+  } catch (error) {
+    console.error("Error in GET /api/beneficios-cliente/:id:", error);
+    res.status(500).json({ error: "Error al consultar beneficio" });
+  }
+});
+
 // 45. POST /api/beneficios-cliente (Admin creates a benefit for client)
 app.post("/api/beneficios-cliente", async (req, res) => {
   try {
@@ -1667,9 +1983,9 @@ app.post("/api/beneficios-cliente", async (req, res) => {
       descripcion: descripcion ? String(descripcion).trim() : undefined,
       tipoDescuento: tipoDescuento === "monto_fijo" ? "monto_fijo" : "porcentaje",
       valorDescuento: Number(valorDescuento),
-      origen: origen || "admin",
+      origen: normalizeBenefitOrigin(origen),
       origenDetalle: origenDetalle ? String(origenDetalle).trim() : undefined,
-      fechaEmision: fechaEmision ? String(fechaEmision) : new Date().toISOString().split("T")[0],
+      fechaEmision: fechaEmision ? String(fechaEmision) : getBusinessDate(),
       fechaVencimiento: fechaVencimiento ? String(fechaVencimiento) : null,
       turnoOrigenId: turnoOrigenId ? String(turnoOrigenId) : null,
       turnoOrigenCodigo: turnoOrigenCodigo ? String(turnoOrigenCodigo) : null,
@@ -1688,12 +2004,119 @@ app.post("/api/beneficios-cliente", async (req, res) => {
 // 46. PUT /api/beneficios-cliente/:id
 app.put("/api/beneficios-cliente/:id", async (req, res) => {
   try {
-    const updated = await updateClientBenefit(req.params.id, req.body);
-    if (!updated) {
-      res.status(404).json({ error: "Beneficio no encontrado" });
+    const benefitId = String(req.params.id || '').trim();
+    if (!benefitId) {
+      res.status(400).json({ error: "ID de beneficio requerido." });
       return;
     }
-    res.json(updated);
+
+    // Construir whitelist explícita de campos administrativos permitidos
+    const allowedUpdates: Partial<ClientBenefit> = {};
+
+    if (req.body.titulo !== undefined) {
+      const titleStr = String(req.body.titulo).trim();
+      if (!titleStr) {
+        res.status(400).json({ error: "El título no puede estar vacío." });
+        return;
+      }
+      allowedUpdates.titulo = titleStr;
+    }
+
+    if (req.body.descripcion !== undefined) {
+      allowedUpdates.descripcion = req.body.descripcion ? String(req.body.descripcion).trim() : undefined;
+    }
+
+    if (req.body.tipoDescuento !== undefined) {
+      if (req.body.tipoDescuento !== "monto_fijo" && req.body.tipoDescuento !== "porcentaje") {
+        res.status(400).json({ error: "Tipo de descuento inválido (debe ser 'porcentaje' o 'monto_fijo')." });
+        return;
+      }
+      allowedUpdates.tipoDescuento = req.body.tipoDescuento;
+    }
+
+    if (req.body.valorDescuento !== undefined) {
+      const val = Number(req.body.valorDescuento);
+      if (isNaN(val) || !isFinite(val) || val <= 0) {
+        res.status(400).json({ error: "El valor de descuento debe ser un número válido mayor a 0." });
+        return;
+      }
+      if (req.body.tipoDescuento === "porcentaje" && val > 100) {
+        res.status(400).json({ error: "El porcentaje no puede ser mayor al 100%." });
+        return;
+      }
+      allowedUpdates.valorDescuento = val;
+    }
+
+    if (req.body.fechaVencimiento !== undefined) {
+      if (req.body.fechaVencimiento) {
+        const d = new Date(req.body.fechaVencimiento);
+        if (isNaN(d.getTime())) {
+          res.status(400).json({ error: "Fecha de vencimiento inválida." });
+          return;
+        }
+        allowedUpdates.fechaVencimiento = String(req.body.fechaVencimiento);
+      } else {
+        allowedUpdates.fechaVencimiento = null;
+      }
+    }
+
+    if (req.body.serviciosAplicables !== undefined) {
+      allowedUpdates.serviciosAplicables = Array.isArray(req.body.serviciosAplicables) && req.body.serviciosAplicables.length > 0
+        ? req.body.serviciosAplicables.map((s: any) => String(s).trim())
+        : ["todos"];
+    }
+
+    if (req.body.montoMinimo !== undefined) {
+      if (req.body.montoMinimo != null && req.body.montoMinimo !== "") {
+        const mm = Number(req.body.montoMinimo);
+        if (isNaN(mm) || !isFinite(mm) || mm < 0) {
+          res.status(400).json({ error: "El monto mínimo debe ser un número positivo." });
+          return;
+        }
+        allowedUpdates.montoMinimo = mm;
+      } else {
+        allowedUpdates.montoMinimo = null;
+      }
+    }
+
+    if (req.body.otorgadoPor !== undefined) {
+      allowedUpdates.otorgadoPor = req.body.otorgadoPor ? String(req.body.otorgadoPor).trim() : undefined;
+    }
+
+    // Transición de estado: únicamente se permite pasar de 'disponible' a 'cancelado'
+    if (req.body.estado !== undefined) {
+      if (req.body.estado === 'cancelado') {
+        allowedUpdates.estado = 'cancelado';
+      } else if (req.body.estado !== 'disponible') {
+        res.status(409).json({
+          error: `Transición de estado a '${req.body.estado}' no permitida administrativamente.`
+        });
+        return;
+      }
+    }
+
+    // Ejecutar actualización atómica condicionada en backend
+    const result: UpdateBenefitResult = await updateClientBenefit(benefitId, allowedUpdates);
+
+    if (result.success === false) {
+      const { reason } = result;
+      if (reason === 'not_found') {
+        res.status(404).json({ error: "Beneficio no encontrado." });
+        return;
+      }
+      if (reason === 'already_used') {
+        res.status(409).json({ error: "Un beneficio utilizado no puede ser editado, cancelado ni reactivado." });
+        return;
+      }
+      if (reason === 'already_cancelled') {
+        res.status(409).json({ error: "Un beneficio cancelado no puede ser editado ni reactivado." });
+        return;
+      }
+      res.status(409).json({ error: "El beneficio ya no se encuentra disponible para ser modificado o cancelado." });
+      return;
+    }
+
+    res.json(result.benefit);
   } catch (error: any) {
     console.error("Error in PUT /api/beneficios-cliente/:id:", error);
     res.status(500).json({ error: error.message || "Error al actualizar beneficio" });
@@ -1763,6 +2186,286 @@ app.post("/api/beneficios-cliente/otorgar-compensacion", async (req, res) => {
     res.status(500).json({ error: error.message || "Error al otorgar compensación" });
   }
 });
+
+// ============================================================================
+// BENEFIT TEMPLATES REST API ROUTES (CATÁLOGO ADMINISTRATIVO REUTILIZABLE)
+// ============================================================================
+
+// 49. GET /api/benefit-templates (List all or active templates)
+app.get("/api/benefit-templates", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { activo, all, search } = req.query;
+    const activoFilter = all === "true" ? undefined : (activo !== undefined ? activo === "true" : undefined);
+    const templates = await getBenefitTemplates({
+      activo: activoFilter,
+      search: search ? String(search) : undefined
+    });
+    res.json(templates);
+  } catch (error) {
+    console.error("Error in GET /api/benefit-templates:", error);
+    res.status(500).json({ error: "Error al obtener plantillas de beneficios" });
+  }
+});
+
+// 50. GET /api/benefit-templates/:id (Get template details)
+app.get("/api/benefit-templates/:id", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const template = await getBenefitTemplateById(req.params.id);
+    if (!template) {
+      res.status(404).json({ error: "Plantilla de beneficio no encontrada" });
+      return;
+    }
+    res.json(template);
+  } catch (error) {
+    console.error("Error in GET /api/benefit-templates/:id:", error);
+    res.status(500).json({ error: "Error al obtener plantilla de beneficio" });
+  }
+});
+
+// 51. POST /api/benefit-templates (Create new benefit template)
+app.post("/api/benefit-templates", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const {
+      nombrePublico,
+      descripcionPublica,
+      tipoDescuento,
+      valorDescuento,
+      vigenciaDias,
+      serviciosAplicables,
+      montoMinimo,
+      activo
+    } = req.body;
+
+    // Validación y sanitización estricta
+    if (!nombrePublico || typeof nombrePublico !== "string" || !nombrePublico.trim()) {
+      res.status(400).json({ error: "El nombre público del beneficio es obligatorio." });
+      return;
+    }
+
+    const cleanNombre = nombrePublico.replace(/<[^>]*>?/gm, '').trim();
+    if (!cleanNombre) {
+      res.status(400).json({ error: "El nombre público no puede contener caracteres inválidos." });
+      return;
+    }
+    if (cleanNombre.length > 200) {
+      res.status(400).json({ error: "El nombre público no puede exceder los 200 caracteres." });
+      return;
+    }
+
+    let cleanDescripcion: string | undefined = undefined;
+    if (descripcionPublica !== undefined && descripcionPublica !== null && String(descripcionPublica).trim() !== "") {
+      cleanDescripcion = String(descripcionPublica).replace(/<[^>]*>?/gm, '').trim();
+      if (cleanDescripcion.length > 500) {
+        res.status(400).json({ error: "La descripción pública no puede exceder los 500 caracteres." });
+        return;
+      }
+    }
+
+    if (tipoDescuento !== "porcentaje" && tipoDescuento !== "monto_fijo") {
+      res.status(400).json({ error: "El tipo de descuento debe ser 'porcentaje' o 'monto_fijo'." });
+      return;
+    }
+
+    const numValor = Number(valorDescuento);
+    if (isNaN(numValor) || !isFinite(numValor) || numValor <= 0) {
+      res.status(400).json({ error: "El valor del descuento debe ser un número mayor a cero." });
+      return;
+    }
+
+    if (tipoDescuento === "porcentaje" && numValor > 100) {
+      res.status(400).json({ error: "El porcentaje de descuento no puede ser mayor al 100%." });
+      return;
+    }
+
+    const numVigencia = Number(vigenciaDias);
+    if (!Number.isInteger(numVigencia) || numVigencia <= 0 || numVigencia > 730) {
+      res.status(400).json({ error: "La vigencia en días debe ser un número entero entre 1 y 730 días (2 años)." });
+      return;
+    }
+
+    // Validar servicios aplicables
+    let validatedServices: string[] = ["todos"];
+    if (Array.isArray(serviciosAplicables) && serviciosAplicables.length > 0) {
+      if (!serviciosAplicables.includes("todos")) {
+        const allServices = await getServices(true);
+        const validServiceIds = new Set(allServices.map(s => s.id));
+        const cleanIds: string[] = [];
+        for (const sId of serviciosAplicables) {
+          const strId = String(sId).trim();
+          if (!validServiceIds.has(strId)) {
+            res.status(400).json({ error: `El servicio ID "${strId}" especificado no existe.` });
+            return;
+          }
+          if (!cleanIds.includes(strId)) {
+            cleanIds.push(strId);
+          }
+        }
+        validatedServices = cleanIds.length > 0 ? cleanIds : ["todos"];
+      }
+    }
+
+    let cleanMontoMinimo: number | null = null;
+    if (montoMinimo != null && montoMinimo !== "") {
+      const numMm = Number(montoMinimo);
+      if (isNaN(numMm) || !isFinite(numMm) || numMm < 0) {
+        res.status(400).json({ error: "El monto mínimo debe ser un número válido positivo o cero." });
+        return;
+      }
+      cleanMontoMinimo = numMm > 0 ? numMm : null;
+    }
+
+    const created = await createBenefitTemplate({
+      nombrePublico: cleanNombre,
+      descripcionPublica: cleanDescripcion,
+      tipoDescuento,
+      valorDescuento: numValor,
+      vigenciaDias: numVigencia,
+      serviciosAplicables: validatedServices,
+      montoMinimo: cleanMontoMinimo,
+      activo: activo !== false
+    });
+
+    res.status(201).json(created);
+  } catch (error: any) {
+    console.error("Error in POST /api/benefit-templates:", error);
+    res.status(500).json({ error: error.message || "Error al crear plantilla de beneficio" });
+  }
+});
+
+// 52. PUT /api/benefit-templates/:id (Update benefit template)
+app.put("/api/benefit-templates/:id", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const templateId = String(req.params.id || "").trim();
+    const existing = await getBenefitTemplateById(templateId);
+    if (!existing) {
+      res.status(404).json({ error: "Plantilla de beneficio no encontrada." });
+      return;
+    }
+
+    const allowedUpdates: Partial<BenefitTemplate> = {};
+
+    if (req.body.nombrePublico !== undefined) {
+      const cleanNombre = String(req.body.nombrePublico).replace(/<[^>]*>?/gm, '').trim();
+      if (!cleanNombre) {
+        res.status(400).json({ error: "El nombre público no puede estar vacío." });
+        return;
+      }
+      if (cleanNombre.length > 200) {
+        res.status(400).json({ error: "El nombre público no puede exceder los 200 caracteres." });
+        return;
+      }
+      allowedUpdates.nombrePublico = cleanNombre;
+    }
+
+    if (req.body.descripcionPublica !== undefined) {
+      if (req.body.descripcionPublica != null && String(req.body.descripcionPublica).trim() !== "") {
+        const cleanDesc = String(req.body.descripcionPublica).replace(/<[^>]*>?/gm, '').trim();
+        if (cleanDesc.length > 500) {
+          res.status(400).json({ error: "La descripción no puede exceder los 500 caracteres." });
+          return;
+        }
+        allowedUpdates.descripcionPublica = cleanDesc;
+      } else {
+        allowedUpdates.descripcionPublica = undefined;
+      }
+    }
+
+    const targetTipo = req.body.tipoDescuento !== undefined ? req.body.tipoDescuento : existing.tipoDescuento;
+    if (req.body.tipoDescuento !== undefined) {
+      if (req.body.tipoDescuento !== "porcentaje" && req.body.tipoDescuento !== "monto_fijo") {
+        res.status(400).json({ error: "El tipo de descuento debe ser 'porcentaje' o 'monto_fijo'." });
+        return;
+      }
+      allowedUpdates.tipoDescuento = req.body.tipoDescuento;
+    }
+
+    if (req.body.valorDescuento !== undefined) {
+      const numVal = Number(req.body.valorDescuento);
+      if (isNaN(numVal) || !isFinite(numVal) || numVal <= 0) {
+        res.status(400).json({ error: "El valor del descuento debe ser un número mayor a 0." });
+        return;
+      }
+      if (targetTipo === "porcentaje" && numVal > 100) {
+        res.status(400).json({ error: "El porcentaje de descuento no puede ser mayor al 100%." });
+        return;
+      }
+      allowedUpdates.valorDescuento = numVal;
+    } else if (req.body.tipoDescuento === "porcentaje" && existing.valorDescuento > 100) {
+      res.status(400).json({ error: "El valor de descuento actual excede el 100% para porcentaje." });
+      return;
+    }
+
+    if (req.body.vigenciaDias !== undefined) {
+      const numVig = Number(req.body.vigenciaDias);
+      if (!Number.isInteger(numVig) || numVig <= 0 || numVig > 730) {
+        res.status(400).json({ error: "La vigencia en días debe ser un número entero entre 1 y 730 días." });
+        return;
+      }
+      allowedUpdates.vigenciaDias = numVig;
+    }
+
+    if (req.body.serviciosAplicables !== undefined) {
+      if (Array.isArray(req.body.serviciosAplicables) && req.body.serviciosAplicables.length > 0 && !req.body.serviciosAplicables.includes("todos")) {
+        const allServices = await getServices(true);
+        const validServiceIds = new Set(allServices.map(s => s.id));
+        const cleanIds: string[] = [];
+        for (const sId of req.body.serviciosAplicables) {
+          const strId = String(sId).trim();
+          if (!validServiceIds.has(strId)) {
+            res.status(400).json({ error: `El servicio ID "${strId}" especificado no existe.` });
+            return;
+          }
+          if (!cleanIds.includes(strId)) {
+            cleanIds.push(strId);
+          }
+        }
+        allowedUpdates.serviciosAplicables = cleanIds.length > 0 ? cleanIds : ["todos"];
+      } else {
+        allowedUpdates.serviciosAplicables = ["todos"];
+      }
+    }
+
+    if (req.body.montoMinimo !== undefined) {
+      if (req.body.montoMinimo != null && req.body.montoMinimo !== "") {
+        const numMm = Number(req.body.montoMinimo);
+        if (isNaN(numMm) || !isFinite(numMm) || numMm < 0) {
+          res.status(400).json({ error: "El monto mínimo debe ser un número positivo o cero." });
+          return;
+        }
+        allowedUpdates.montoMinimo = numMm > 0 ? numMm : null;
+      } else {
+        allowedUpdates.montoMinimo = null;
+      }
+    }
+
+    if (req.body.activo !== undefined) {
+      allowedUpdates.activo = Boolean(req.body.activo);
+    }
+
+    const updated = await updateBenefitTemplate(templateId, allowedUpdates);
+    res.json(updated);
+  } catch (error: any) {
+    console.error("Error in PUT /api/benefit-templates/:id:", error);
+    res.status(500).json({ error: error.message || "Error al actualizar plantilla de beneficio" });
+  }
+});
+
+// 53. PATCH /api/benefit-templates/:id/toggle (Toggle active status)
+app.patch("/api/benefit-templates/:id/toggle", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const templateId = String(req.params.id || "").trim();
+    const updated = await toggleBenefitTemplateActive(templateId);
+    if (!updated) {
+      res.status(404).json({ error: "Plantilla de beneficio no encontrada." });
+      return;
+    }
+    res.json(updated);
+  } catch (error: any) {
+    console.error("Error in PATCH /api/benefit-templates/:id/toggle:", error);
+    res.status(500).json({ error: error.message || "Error al cambiar estado de plantilla" });
+  }
+});
+
 
 // ============================================================================
 // VITE MIDDLEWARE SETUP FOR DEV & PROD

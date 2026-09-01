@@ -5,6 +5,7 @@ import {
   NotificationResult, 
   NotificationSendOptions 
 } from './types';
+import { isoDateToAR } from '../../utils/dateUtils.js';
 
 /**
  * WhatsApp Notification Provider (Prepared skeleton for future activation).
@@ -24,6 +25,7 @@ export class WhatsAppNotificationProvider implements NotificationProvider {
   private generateWhatsAppMessage(data: CancellationNotificationData): string {
     const fullName = `${data.clienteNombre} ${data.clienteApellido || ''}`.trim();
     const profLine = data.profesionalNombre ? `\n*Profesional:* ${data.profesionalNombre}` : '';
+    const fechaAR = isoDateToAR(data.fecha);
 
     return (
       `🌸 *Nails & Beauty Studio* - Aviso de Cancelación\n\n` +
@@ -31,7 +33,7 @@ export class WhatsAppNotificationProvider implements NotificationProvider {
       `📌 *Detalle de la reserva:*\n` +
       `• *Código:* ${data.codigo}\n` +
       `• *Servicio:* ${data.servicioNombre}\n` +
-      `• *Fecha:* ${data.fecha}\n` +
+      `• *Fecha:* ${fechaAR}\n` +
       `• *Horario:* ${data.horaInicio} a ${data.horaFin} hs${profLine}\n\n` +
       `⚠️ *Motivo:* ${data.motivoCancelacion || 'Cancelado por el salón'}\n\n` +
       `Lamentamos el inconveniente. Podés agendar un nuevo horario desde nuestra web.`

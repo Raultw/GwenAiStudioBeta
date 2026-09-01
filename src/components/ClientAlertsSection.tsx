@@ -13,6 +13,7 @@ import {
   Check
 } from 'lucide-react';
 import type { ClientAlert, AlertType, AlertSeverity } from '../types.js';
+import { getBusinessDate, isoDateToAR } from '../utils/dateUtils.js';
 
 interface ClientAlertsSectionProps {
   clientId: string;
@@ -66,7 +67,7 @@ export const ClientAlertsSection: React.FC<ClientAlertsSectionProps> = ({
     descripcion: '',
     productoServicioRelacionado: '',
     severidad: 'moderada' as AlertSeverity,
-    fecha: new Date().toISOString().split('T')[0],
+    fecha: getBusinessDate(),
     activa: true,
     observaciones: ''
   });
@@ -77,7 +78,7 @@ export const ClientAlertsSection: React.FC<ClientAlertsSectionProps> = ({
       descripcion: '',
       productoServicioRelacionado: '',
       severidad: 'moderada',
-      fecha: new Date().toISOString().split('T')[0],
+      fecha: getBusinessDate(),
       activa: true,
       observaciones: ''
     });
@@ -123,6 +124,7 @@ export const ClientAlertsSection: React.FC<ClientAlertsSectionProps> = ({
         const res = await fetch(`/api/clientes/${clientId}/alertas/${editingAlertId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify(form)
         });
         if (res.ok) {
@@ -137,6 +139,7 @@ export const ClientAlertsSection: React.FC<ClientAlertsSectionProps> = ({
         const res = await fetch(`/api/clientes/${clientId}/alertas`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify(form)
         });
         if (res.ok) {
@@ -160,6 +163,7 @@ export const ClientAlertsSection: React.FC<ClientAlertsSectionProps> = ({
       const res = await fetch(`/api/clientes/${clientId}/alertas/${alert.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ activa: !alert.activa })
       });
       if (res.ok) {
@@ -176,7 +180,8 @@ export const ClientAlertsSection: React.FC<ClientAlertsSectionProps> = ({
 
     try {
       const res = await fetch(`/api/clientes/${clientId}/alertas/${alertId}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        credentials: 'include'
       });
       if (res.ok) {
         showToast('Alerta eliminada.');
@@ -454,7 +459,7 @@ export const ClientAlertsSection: React.FC<ClientAlertsSectionProps> = ({
 
                   <div className="text-[10px] text-[#8C7A70] flex items-center gap-1 font-mono pt-1">
                     <Calendar className="w-3 h-3" />
-                    Registrado el {alert.fecha}
+                    Registrado el {isoDateToAR(alert.fecha)}
                   </div>
                 </div>
               );
@@ -477,7 +482,7 @@ export const ClientAlertsSection: React.FC<ClientAlertsSectionProps> = ({
               >
                 <div>
                   <span className="line-through font-medium text-stone-600">{alert.descripcion}</span>
-                  <span className="text-[10px] text-stone-400 block font-mono">Fecha: {alert.fecha}</span>
+                  <span className="text-[10px] text-stone-400 block font-mono">Fecha: {isoDateToAR(alert.fecha)}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <button

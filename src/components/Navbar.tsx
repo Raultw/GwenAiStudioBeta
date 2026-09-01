@@ -59,10 +59,10 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenAdmin, onSelectBooking }) 
             <button
               onClick={onOpenAdmin}
               className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#8E4455]/80 hover:bg-[#8E4455] text-white transition-colors text-[11px] font-medium cursor-pointer border border-[#E8C5CE]/30"
-              title="Panel de Administración (Control de Turnos)"
+              title="Panel de Administración (Gestión y Control de Turnos)"
             >
               <Lock className="w-3 h-3 text-[#D4AF37]" />
-              <span>Panel Admin (PIN: 1234)</span>
+              <span>Panel Admin</span>
             </button>
           </div>
         </div>
@@ -153,14 +153,11 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenAdmin, onSelectBooking }) 
                     setMobileMenuOpen(false);
                     onOpenAdmin();
                   }}
-                  className="flex items-center justify-between text-xs text-[#241E1A] bg-white border border-[#D9C9BF] p-3 rounded-xl shadow-xs"
+                  className="flex items-center justify-between text-xs text-[#241E1A] bg-white border border-[#D9C9BF] p-3 rounded-xl shadow-xs w-full cursor-pointer"
                 >
                   <span className="flex items-center gap-2 font-medium">
                     <Lock className="w-4 h-4 text-[#8E4455]" />
-                    Panel Admin (Control de Turnos)
-                  </span>
-                  <span className="text-[10px] font-mono bg-[#FAF7F2] px-2 py-0.5 rounded border border-[#E8DCD5] text-[#8E4455]">
-                    PIN: 1234
+                    Panel Admin (Gestión)
                   </span>
                 </button>
               </div>

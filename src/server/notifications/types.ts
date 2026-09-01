@@ -6,7 +6,16 @@ export type NotificationType =
   | 'appointment_reminder'
   | 'availability_exception_cancellation';
 
-export type NotificationStatus = 'sent' | 'failed' | 'skipped';
+export type NotificationStatus = 'sent' | 'failed' | 'skipped' | 'pending' | 'omitido_sin_email' | 'processing';
+
+export interface CancellationBenefitSnapshot {
+  titulo: string;
+  descripcion?: string;
+  tipoDescuento: string;
+  valorDescuento: number;
+  fechaVencimiento?: string | null;
+  codigo?: string;
+}
 
 export interface CancellationNotificationData {
   appointmentId: string;
@@ -23,6 +32,7 @@ export interface CancellationNotificationData {
   profesionalNombre?: string;
   origen?: string;
   canceladoPor?: string;
+  beneficio?: CancellationBenefitSnapshot;
 }
 
 export interface NotificationSendOptions {
@@ -42,6 +52,7 @@ export interface NotificationResult {
   error?: string;
   idempotencyKey?: string;
   sentAt?: string;
+  providerMessageId?: string;
 }
 
 export interface NotificationLog {
@@ -55,6 +66,12 @@ export interface NotificationLog {
   message?: string;
   idempotencyKey?: string;
   error?: string;
-  sentAt: string;
+  sentAt?: string;
+  processingStartedAt?: string;
+  leaseExpiresAt?: string;
+  attemptCount?: number;
+  maxAttempts?: number;
+  nextAttemptAt?: string;
+  providerMessageId?: string;
   metadata?: Record<string, any>;
 }

@@ -15,19 +15,31 @@ import {
   CalendarCheck,
   Ban,
   ArrowRight,
-  History
+  History,
+  Gift,
+  Tag,
+  Percent,
+  Check
 } from 'lucide-react';
 import type { 
   Professional, 
   AvailabilityException, 
   ScheduleScope, 
   AvailabilityExceptionType, 
-  TimeInterval 
+  TimeInterval,
+  BenefitTemplate
 } from '../types.js';
+import { 
+  getBusinessDate, 
+  isoDateToAR, 
+  formatDateWithWeekdayAR,
+  addDaysToIsoDate
+} from '../utils/dateUtils.js';
 
 interface AvailabilityExceptionsAdminProps {
   professionals?: Professional[];
   onRefreshData?: () => void;
+  onAuthError?: () => void;
 }
 
 interface CoverageModalData {
@@ -49,28 +61,17 @@ interface ConflictModalData {
 }
 
 const getTodayIso = () => {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return getBusinessDate();
 };
 
 const formatDateFriendly = (isoDate: string) => {
-  if (!isoDate || !isoDate.includes('-')) return isoDate;
-  const [y, m, d] = isoDate.split('-').map(Number);
-  const dateObj = new Date(y, m - 1, d);
-  const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
-  const monthNames = [
-    'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
-    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
-  ];
-  return `${dayNames[dateObj.getDay()]}, ${d} de ${monthNames[m - 1]} de ${y}`;
+  return formatDateWithWeekdayAR(isoDate);
 };
 
 export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminProps> = ({
   professionals = [],
-  onRefreshData
+  onRefreshData,
+  onAuthError
 }) => {
   const [exceptions, setExceptions] = useState<AvailabilityException[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -95,12 +96,23 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
   const [conflictModalData, setConflictModalData] = useState<ConflictModalData | null>(null);
   const [isCancellingConflicts, setIsCancellingConflicts] = useState<boolean>(false);
 
+  // Compensation Benefit State for Conflicting Appointments
+  const [benefitTemplates, setBenefitTemplates] = useState<BenefitTemplate[]>([]);
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState<boolean>(false);
+  const [attachBenefit, setAttachBenefit] = useState<boolean>(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
+  const [selectedAppointmentIds, setSelectedAppointmentIds] = useState<string[]>([]);
+
   // Load exceptions
   const loadExceptions = async () => {
     setIsLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch('/api/excepciones-disponibilidad');
+      const res = await fetch('/api/excepciones-disponibilidad', { credentials: 'include' });
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
       if (res.ok) {
         const list: AvailabilityException[] = await res.json();
         setExceptions(list);
@@ -113,8 +125,33 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
     }
   };
 
+  // Load active benefit templates
+  const loadBenefitTemplates = async () => {
+    setIsLoadingTemplates(true);
+    try {
+      const res = await fetch('/api/benefit-templates', { credentials: 'include' });
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
+      if (res.ok) {
+        const list: BenefitTemplate[] = await res.json();
+        const activeList = list.filter(t => t.activo);
+        setBenefitTemplates(activeList);
+        if (activeList.length > 0 && !selectedTemplateId) {
+          setSelectedTemplateId(activeList[0].id);
+        }
+      }
+    } catch (err) {
+      console.error('Error loading benefit templates:', err);
+    } finally {
+      setIsLoadingTemplates(false);
+    }
+  };
+
   useEffect(() => {
     loadExceptions();
+    loadBenefitTemplates();
   }, []);
 
   // Split into future/today vs past historical exceptions
@@ -186,11 +223,20 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
     const res = await fetch('/api/excepciones-disponibilidad', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
         ...payloadToUse,
-        forceCancelConflicts: forceCancel
+        forceCancelConflicts: forceCancel,
+        adjuntarBeneficio: forceCancel ? attachBenefit : false,
+        benefitTemplateId: forceCancel && attachBenefit ? selectedTemplateId : undefined,
+        benefitAppointmentIds: forceCancel && attachBenefit ? selectedAppointmentIds : undefined
       })
     });
+
+    if (res.status === 401) {
+      onAuthError?.();
+      return;
+    }
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -199,22 +245,40 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
 
     const data = await res.json().catch(() => ({}));
     const cancelledCount = data.cancelledCount || 0;
+    const issuedBenefitsCount = data.issuedBenefitsCount || 0;
 
-    setSuccessMsg(
-      cancelledCount > 0
-        ? `¡Excepción guardada! Se cancelaron ${cancelledCount} turno(s) afectado(s) correctamente.`
-        : `¡Excepción de disponibilidad para el ${formFecha} guardada con éxito!`
-    );
+    let msg = `¡Excepción de disponibilidad para el ${isoDateToAR(formFecha)} guardada con éxito!`;
+    if (cancelledCount > 0) {
+      msg = `¡Excepción guardada! Se cancelaron ${cancelledCount} turno(s) afectado(s) correctamente.`;
+      if (issuedBenefitsCount > 0) {
+        msg += ` Se otorgaron ${issuedBenefitsCount} beneficio(s) de compensación.`;
+      }
+    }
+
+    setSuccessMsg(msg);
     setTimeout(() => setSuccessMsg(null), 6000);
     setIsFormOpen(false);
     setFormMotivo('');
     setFormSelectedProfIds([]);
     setConflictModalData(null);
+    setAttachBenefit(false);
+    setSelectedAppointmentIds([]);
     await loadExceptions();
     if (onRefreshData) onRefreshData();
   };
 
   const handleConfirmConflictModal = async () => {
+    if (attachBenefit) {
+      if (!selectedTemplateId) {
+        setErrorMsg('Seleccioná una plantilla de beneficio para otorgar la compensación.');
+        return;
+      }
+      if (selectedAppointmentIds.length === 0) {
+        setErrorMsg('Seleccioná al menos un turno para recibir el beneficio o desactivá la compensación.');
+        return;
+      }
+    }
+
     setIsCancellingConflicts(true);
     setErrorMsg(null);
     try {
@@ -229,6 +293,8 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
 
   const handleCancelConflictModal = () => {
     setConflictModalData(null);
+    setAttachBenefit(false);
+    setSelectedAppointmentIds([]);
   };
 
   // Submit Exception Handler
@@ -281,8 +347,14 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
       const checkConflictsRes = await fetch('/api/excepciones-disponibilidad/check-conflictos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
+
+      if (checkConflictsRes.status === 401) {
+        onAuthError?.();
+        return;
+      }
 
       if (checkConflictsRes.ok) {
         const conflictData = await checkConflictsRes.json();
@@ -292,6 +364,13 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
             conflicts: conflictData.conflicts,
             payload
           });
+          setSelectedAppointmentIds(conflictData.conflicts.map((c: any) => c.id));
+          setAttachBenefit(false);
+          if (benefitTemplates.length > 0) {
+            setSelectedTemplateId(benefitTemplates[0].id);
+          } else {
+            loadBenefitTemplates();
+          }
           setIsSubmitting(false);
           return;
         }
@@ -302,11 +381,17 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
         const checkRes = await fetch('/api/excepciones-disponibilidad/check-cobertura', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({
             fecha: formFecha,
             profesionalIntervalos: formIntervalos
           })
         });
+
+        if (checkRes.status === 401) {
+          onAuthError?.();
+          return;
+        }
 
         if (checkRes.ok) {
           const checkData = await checkRes.json();
@@ -352,12 +437,18 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
       const extRes = await fetch('/api/excepciones-disponibilidad/auto-extender-local', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           fecha: coverageModalData.fecha,
           requiredIntervals: coverageModalData.requiredStudioIntervals,
           motivo: `Apertura extendida del salón para cubrir atención de profesionales (${formMotivo || 'Excepción especial'})`
         })
       });
+
+      if (extRes.status === 401) {
+        onAuthError?.();
+        return;
+      }
 
       if (!extRes.ok) {
         const data = await extRes.json().catch(() => ({}));
@@ -369,7 +460,7 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
 
       // 3. Close modal and show compound success message
       setCoverageModalData(null);
-      setSuccessMsg(`¡Horario del salón extendido y excepción de disponibilidad guardada con éxito para el ${coverageModalData.fecha}!`);
+      setSuccessMsg(`¡Horario del salón extendido y excepción de disponibilidad guardada con éxito para el ${isoDateToAR(coverageModalData.fecha)}!`);
       setTimeout(() => setSuccessMsg(null), 6000);
     } catch (err: any) {
       console.error('Error extending studio and saving professional exception:', err);
@@ -393,8 +484,13 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
 
     try {
       const res = await fetch(`/api/excepciones-disponibilidad/${exc.id}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        credentials: 'include'
       });
+      if (res.status === 401) {
+        onAuthError?.();
+        return;
+      }
       if (res.ok) {
         setSuccessMsg('Excepción eliminada con éxito.');
         setTimeout(() => setSuccessMsg(null), 4000);
@@ -821,7 +917,7 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
                   {coverageModalData.isStudioClosed ? (
                     <div className="flex items-center gap-2 text-amber-950 font-medium">
                       <span className="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
-                      <span>El salón figura cerrado todo el día ({coverageModalData.fecha})</span>
+                      <span>El salón figura cerrado todo el día ({isoDateToAR(coverageModalData.fecha)})</span>
                     </div>
                   ) : coverageModalData.uncoveredIntervals.length > 0 ? (
                     coverageModalData.uncoveredIntervals.map((int, i) => (
@@ -892,105 +988,298 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
       )}
 
       {/* CONFLICT WARNING MODAL FOR RESTRICTIVE EXCEPTIONS */}
-      {conflictModalData && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl border border-[#E8DCD5] space-y-6 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-start gap-4">
-              <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0 text-amber-700">
-                <AlertTriangle className="w-6 h-6" />
-              </div>
-              <div className="space-y-1">
-                <h3 className="font-serif font-bold text-xl text-[#241E1A]">
-                  Turnos afectados detectados
-                </h3>
-                <p className="text-sm text-[#7A6B62]">
-                  La excepción restrictiva para el <strong className="text-[#241E1A]">{formatDateFriendly(conflictModalData.fecha)}</strong> afecta a los siguientes turnos ya reservados:
-                </p>
-              </div>
-            </div>
+      {conflictModalData && (() => {
+        const selectedTemplate = benefitTemplates.find(t => t.id === selectedTemplateId);
+        const calculatedExpiryIso = selectedTemplate ? addDaysToIsoDate(getBusinessDate(), selectedTemplate.vigenciaDias) : '';
+        const calculatedExpiryFormatted = calculatedExpiryIso ? isoDateToAR(calculatedExpiryIso) : '';
+        const allConflictIds = conflictModalData.conflicts.map((c: any) => c.id);
+        const isAllSelected = allConflictIds.length > 0 && allConflictIds.every((id: string) => selectedAppointmentIds.includes(id));
 
-            {/* List grouped by professional */}
-            <div className="max-h-64 overflow-y-auto space-y-3 pr-1">
-              {Object.entries(
-                conflictModalData.conflicts.reduce((acc: Record<string, any[]>, apt: any) => {
-                  const profName = apt.profesionalNombre || professionals.find(p => p.id === apt.profesionalId)?.nombre || 'Salón / Sin asignar';
-                  if (!acc[profName]) acc[profName] = [];
-                  acc[profName].push(apt);
-                  return acc;
-                }, {})
-              ).map(([profName, apts]: [string, any[]]) => (
-                <div key={profName} className="bg-[#FAF7F2] p-4 rounded-2xl border border-[#E8DCD5] space-y-2">
-                  <h4 className="font-serif font-bold text-xs uppercase tracking-wider text-[#8E4455] flex items-center gap-1.5">
-                    <Users className="w-3.5 h-3.5" />
-                    {profName} ({apts.length} {apts.length === 1 ? 'turno' : 'turnos'})
-                  </h4>
-                  <div className="space-y-2">
-                    {apts.map((apt: any) => (
-                      <div key={apt.id} className="bg-white p-3 rounded-xl border border-[#E8DCD5] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                        <div className="space-y-0.5">
-                          <p className="font-semibold text-[#241E1A]">
-                            {apt.nombre} {apt.apellido}
+        const toggleAppointmentBenefit = (aptId: string) => {
+          setSelectedAppointmentIds(prev => 
+            prev.includes(aptId) ? prev.filter(id => id !== aptId) : [...prev, aptId]
+          );
+        };
+
+        const handleSelectAllAppointmentBenefits = () => {
+          setSelectedAppointmentIds(allConflictIds);
+        };
+
+        const handleDeselectAllAppointmentBenefits = () => {
+          setSelectedAppointmentIds([]);
+        };
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <div className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl border border-[#E8DCD5] space-y-6 animate-in fade-in zoom-in-95 duration-200 my-8">
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0 text-amber-700">
+                  <AlertTriangle className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="font-serif font-bold text-xl text-[#241E1A]">
+                    Turnos afectados detectados
+                  </h3>
+                  <p className="text-sm text-[#7A6B62]">
+                    La excepción restrictiva para el <strong className="text-[#241E1A]">{formatDateFriendly(conflictModalData.fecha)}</strong> cancelará los siguientes turnos confirmados:
+                  </p>
+                </div>
+              </div>
+
+              {/* List grouped by professional */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-[#5A4B43]">
+                    Listado de turnos ({conflictModalData.conflicts.length})
+                  </span>
+                  {attachBenefit && (
+                    <div className="flex items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={isAllSelected ? handleDeselectAllAppointmentBenefits : handleSelectAllAppointmentBenefits}
+                        className="text-[#8E4455] hover:underline font-semibold cursor-pointer"
+                      >
+                        {isAllSelected ? 'Deseleccionar todos' : 'Seleccionar todos'}
+                      </button>
+                      <span className="text-[#7A6B62]">
+                        ({selectedAppointmentIds.length} seleccionados para compensar)
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="max-h-56 overflow-y-auto space-y-3 pr-1 border border-[#E8DCD5] rounded-2xl p-3 bg-[#FAF7F2]/50">
+                  {Object.entries(
+                    conflictModalData.conflicts.reduce((acc: Record<string, any[]>, apt: any) => {
+                      const profName = apt.profesionalNombre || professionals.find(p => p.id === apt.profesionalId)?.nombre || 'Salón / Sin asignar';
+                      if (!acc[profName]) acc[profName] = [];
+                      acc[profName].push(apt);
+                      return acc;
+                    }, {})
+                  ).map(([profName, apts]: [string, any[]]) => (
+                    <div key={profName} className="bg-white p-3.5 rounded-xl border border-[#E8DCD5] space-y-2.5">
+                      <h4 className="font-serif font-bold text-xs uppercase tracking-wider text-[#8E4455] flex items-center gap-1.5">
+                        <Users className="w-3.5 h-3.5" />
+                        {profName} ({apts.length} {apts.length === 1 ? 'turno' : 'turnos'})
+                      </h4>
+                      <div className="space-y-2">
+                        {apts.map((apt: any) => {
+                          const isBenefitSelected = selectedAppointmentIds.includes(apt.id);
+                          return (
+                            <div 
+                              key={apt.id} 
+                              className={`p-2.5 rounded-xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs ${
+                                attachBenefit && isBenefitSelected
+                                  ? 'bg-rose-50/40 border-rose-200'
+                                  : 'bg-[#FAF7F2] border-[#E8DCD5]'
+                              }`}
+                            >
+                              <div className="flex items-start sm:items-center gap-2.5">
+                                {attachBenefit && (
+                                  <input
+                                    type="checkbox"
+                                    id={`apt-benefit-${apt.id}`}
+                                    checked={isBenefitSelected}
+                                    onChange={() => toggleAppointmentBenefit(apt.id)}
+                                    className="mt-0.5 sm:mt-0 w-4 h-4 rounded border-[#D9C9BF] text-[#8E4455] focus:ring-[#8E4455] cursor-pointer"
+                                  />
+                                )}
+                                <div className="space-y-0.5">
+                                  <label 
+                                    htmlFor={`apt-benefit-${apt.id}`}
+                                    className="font-semibold text-[#241E1A] cursor-pointer flex items-center gap-1.5"
+                                  >
+                                    <span>{apt.nombre} {apt.apellido}</span>
+                                    <span className="font-mono text-[10px] text-[#7A6B62]">({apt.codigo})</span>
+                                  </label>
+                                  <p className="text-[11px] text-[#7A6B62]">
+                                    Servicio: <strong className="text-[#241E1A]">{apt.servicioNombre}</strong>
+                                    {apt.email ? ` · ✉️ ${apt.email}` : ' · ⚠️ Sin email'}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                {attachBenefit && isBenefitSelected && (
+                                  <span className="text-[10px] bg-rose-100 text-rose-800 font-semibold px-2 py-0.5 rounded-md border border-rose-200 flex items-center gap-1">
+                                    <Gift className="w-3 h-3" />
+                                    Compensar
+                                  </span>
+                                )}
+                                <div className="flex items-center gap-1.5 font-mono font-bold text-[#8E4455] bg-rose-50/80 px-2.5 py-1 rounded-lg border border-rose-100">
+                                  <Clock className="w-3 h-3" />
+                                  <span>{apt.horaInicio} - {apt.horaFin} hs</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* COMPENSATION BENEFIT SECTION */}
+              <div className="bg-[#FAF7F2] p-4 sm:p-5 rounded-2xl border border-[#E8DCD5] space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-rose-100 text-[#8E4455] flex items-center justify-center font-bold">
+                      <Gift className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-serif font-bold text-sm text-[#241E1A]">
+                        Beneficio de compensación
+                      </h4>
+                      <p className="text-[11px] text-[#7A6B62]">
+                        Otorgar un beneficio del catálogo a las clientas afectadas
+                      </p>
+                    </div>
+                  </div>
+
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={attachBenefit}
+                      onChange={(e) => setAttachBenefit(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-stone-300 peer-focus:outline-hidden rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-stone-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#8E4455]"></div>
+                  </label>
+                </div>
+
+                {attachBenefit && (
+                  <div className="pt-3 border-t border-[#E8DCD5] space-y-3">
+                    {isLoadingTemplates ? (
+                      <div className="py-4 text-center text-xs text-[#7A6B62] flex items-center justify-center gap-2">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#8E4455]" />
+                        <span>Cargando catálogo de beneficios...</span>
+                      </div>
+                    ) : benefitTemplates.length === 0 ? (
+                      <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-semibold">No hay plantillas de beneficios activas disponibles.</p>
+                          <p className="text-[11px] text-amber-800">
+                            Creá plantillas en la pestaña “Plantillas de Beneficios” para utilizarlas como compensación.
                           </p>
-                          <p className="text-[#7A6B62]">
-                            Servicio: <span className="font-medium text-[#241E1A]">{apt.servicioNombre}</span>
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0 font-mono font-bold text-[#8E4455] bg-rose-50/60 px-2.5 py-1 rounded-lg border border-rose-100">
-                          <Clock className="w-3.5 h-3.5" />
-                          <span>{apt.horaInicio} - {apt.horaFin} hs</span>
                         </div>
                       </div>
-                    ))}
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-[#241E1A]">
+                            Seleccionar plantilla de compensación *
+                          </label>
+                          <select
+                            value={selectedTemplateId}
+                            onChange={(e) => setSelectedTemplateId(e.target.value)}
+                            className="w-full bg-white border border-[#D9C9BF] rounded-xl px-3 py-2 text-xs text-[#241E1A] focus:ring-2 focus:ring-[#8E4455] focus:outline-hidden cursor-pointer"
+                          >
+                            {benefitTemplates.map(t => (
+                              <option key={t.id} value={t.id}>
+                                {t.nombrePublico} — {t.tipoDescuento === 'porcentaje' ? `${t.valorDescuento}% OFF` : `$${t.valorDescuento.toLocaleString('es-AR')} OFF`} ({t.vigenciaDias} días de vigencia)
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {selectedTemplate && (
+                          <div className="p-3 bg-white rounded-xl border border-[#E8DCD5] space-y-2 text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-[#241E1A] flex items-center gap-1.5">
+                                <Tag className="w-3.5 h-3.5 text-[#8E4455]" />
+                                {selectedTemplate.nombrePublico}
+                              </span>
+                              <span className="bg-rose-100 text-rose-800 font-bold px-2 py-0.5 rounded-full text-[11px] border border-rose-200">
+                                {selectedTemplate.tipoDescuento === 'porcentaje'
+                                  ? `${selectedTemplate.valorDescuento}% OFF`
+                                  : `$${selectedTemplate.valorDescuento.toLocaleString('es-AR')} OFF`}
+                              </span>
+                            </div>
+
+                            {selectedTemplate.descripcionPublica && (
+                              <p className="text-[11px] text-[#7A6B62] italic">
+                                "{selectedTemplate.descripcionPublica}"
+                              </p>
+                            )}
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-stone-100 text-[11px] text-[#5A4B43]">
+                              <div>
+                                <strong>Vigencia calculada: </strong>
+                                <span className="font-medium text-[#241E1A]">
+                                  {selectedTemplate.vigenciaDias} días (Vence el {calculatedExpiryFormatted})
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Servicios: </strong>
+                                <span className="font-medium text-[#241E1A]">
+                                  {selectedTemplate.serviciosAplicables.includes('todos') ? 'Todos los servicios' : 'Servicios específicos'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Warning details box */}
-            <div className="p-4 rounded-2xl bg-rose-50/80 border border-rose-200 text-xs text-rose-900 space-y-2">
-              <p className="font-bold flex items-center gap-1.5">
-                <Ban className="w-4 h-4 text-rose-700" />
-                Al confirmar esta excepción:
-              </p>
-              <ul className="list-disc list-inside space-y-1 text-rose-800/90 pl-1">
-                <li>Los turnos afectados serán <strong>cancelados automáticamente</strong>.</li>
-                <li>Se registrará el motivo: <span className="italic font-medium">“Cancelado por parte del salón, por excepción de horarios”</span>.</li>
-                <li>Se enviará un email de notificación a los clientes afectados.</li>
-              </ul>
-            </div>
-
-            {/* Actions */}
-            <div className="flex items-center justify-end gap-3 pt-2">
-              <button
-                type="button"
-                onClick={handleCancelConflictModal}
-                disabled={isCancellingConflicts}
-                className="px-5 py-2.5 rounded-xl border border-[#E8DCD5] text-xs font-medium text-[#7A6B62] hover:bg-[#FAF7F2] transition-all cursor-pointer disabled:opacity-50"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmConflictModal}
-                disabled={isCancellingConflicts}
-                className="px-5 py-2.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold shadow-md transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
-              >
-                {isCancellingConflicts ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Cancelando turnos y aplicando...</span>
-                  </>
-                ) : (
-                  <>
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Confirmar y cancelar turnos afectados</span>
-                  </>
                 )}
-              </button>
+              </div>
+
+              {/* Warning details box */}
+              <div className="p-4 rounded-2xl bg-rose-50/80 border border-rose-200 text-xs text-rose-900 space-y-2">
+                <p className="font-bold flex items-center gap-1.5">
+                  <Ban className="w-4 h-4 text-rose-700" />
+                  Al confirmar esta excepción:
+                </p>
+                <ul className="list-disc list-inside space-y-1 text-rose-800/90 pl-1">
+                  <li>Los turnos afectados serán <strong>cancelados automáticamente</strong>.</li>
+                  <li>Se registrará el motivo: <span className="italic font-medium">“Cancelado por parte del salón, por excepción de horarios”</span>.</li>
+                  {attachBenefit && (
+                    <li>
+                      Se otorgará el beneficio seleccionado a los <strong>{selectedAppointmentIds.length} turno(s) marcados</strong>, quedando disponible en su cuenta.
+                    </li>
+                  )}
+                  <li>Se enviará una notificación por email con el detalle de la cancelación{attachBenefit ? ' y el beneficio adjunto' : ''} a las clientas con correo registrado.</li>
+                </ul>
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col sm:flex-row items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={handleCancelConflictModal}
+                  disabled={isCancellingConflicts}
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl border border-[#E8DCD5] text-xs font-medium text-[#7A6B62] hover:bg-[#FAF7F2] transition-all cursor-pointer disabled:opacity-50 text-center"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmConflictModal}
+                  disabled={isCancellingConflicts || (attachBenefit && (!selectedTemplateId || selectedAppointmentIds.length === 0))}
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isCancellingConflicts ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Cancelando turnos y aplicando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>
+                        {attachBenefit && selectedAppointmentIds.length > 0
+                          ? `Confirmar cancelación y emitir ${selectedAppointmentIds.length} beneficio(s)`
+                          : 'Confirmar y cancelar turnos afectados'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* UPCOMING & ACTIVE EXCEPTIONS */}
       <div className="bg-white p-6 sm:p-7 rounded-3xl border border-[#E8DCD5] shadow-xs space-y-4">
@@ -1032,7 +1321,7 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-serif font-bold text-sm text-[#241E1A] flex items-center gap-1.5">
                         <Calendar className="w-3.5 h-3.5 text-[#8E4455]" />
-                        {exc.fecha}
+                        {isoDateToAR(exc.fecha)}
                       </span>
                       <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
                         isCerrado
@@ -1110,7 +1399,7 @@ export const AvailabilityExceptionsAdmin: React.FC<AvailabilityExceptionsAdminPr
                 className="p-3.5 rounded-xl bg-white border border-stone-200 text-xs text-stone-600 space-y-1.5"
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-mono font-bold text-stone-800">{exc.fecha}</span>
+                  <span className="font-mono font-bold text-stone-800">{isoDateToAR(exc.fecha)}</span>
                   <span className="text-[10px] bg-stone-100 text-stone-600 px-2 py-0.5 rounded-md font-semibold">
                     {exc.tipo === 'cerrado' ? 'Cerrado' : 'Horario Especial'}
                   </span>

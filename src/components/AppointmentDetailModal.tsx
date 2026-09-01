@@ -26,6 +26,11 @@ import {
   Trash2
 } from 'lucide-react';
 import { Appointment, AppointmentStatus, ClientWithFullProfile, ClientAlert, ClientPreferences, ClientTipConfigItem } from '../types';
+import { 
+  isoDateToAR, 
+  formatDateLongAR, 
+  formatDateTimeAR 
+} from '../utils/dateUtils.js';
 
 interface AppointmentDetailModalProps {
   isOpen: boolean;
@@ -81,28 +86,12 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
 
   const formatClienteDesdeDate = (iso?: string) => {
     if (!iso) return '';
-    try {
-      const dateOnly = iso.split('T')[0];
-      const [y, m, d] = dateOnly.split('-');
-      if (y && m && d) {
-        const dateObj = new Date(Number(y), Number(m) - 1, Number(d));
-        if (!isNaN(dateObj.getTime())) {
-          return dateObj.toLocaleDateString('es-AR', { day: 'numeric', month: 'long', year: 'numeric' });
-        }
-        return `${d}/${m}/${y}`;
-      }
-    } catch (e) {
-      // fallback
-    }
-    return iso;
+    return formatDateLongAR(iso);
   };
 
   const formatDateFriendly = (iso?: string) => {
     if (!iso) return '';
-    const datePart = iso.split('T')[0];
-    const [y, m, d] = datePart.split('-');
-    if (!y || !m || !d) return iso;
-    return `${d}/${m}/${y}`;
+    return isoDateToAR(iso);
   };
 
   // Reset & load client data whenever the appointment changes
@@ -124,7 +113,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
       setIsLoadingProfile(true);
       try {
         if (appointment.clienteId) {
-          const res = await fetch(`/api/clientes/${appointment.clienteId}`);
+          const res = await fetch(`/api/clientes/${appointment.clienteId}`, { credentials: 'include' });
           if (res.ok) {
             const data: ClientWithFullProfile = await res.json();
             setClientProfile(data);
@@ -134,12 +123,12 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
 
         // Fallback: lookup client by telephone or normalized digits
         const phoneParam = appointment.telefono ? encodeURIComponent(appointment.telefono) : '';
-        const searchRes = await fetch(`/api/clientes?search=${phoneParam}`);
+        const searchRes = await fetch(`/api/clientes?search=${phoneParam}`, { credentials: 'include' });
         if (searchRes.ok) {
           const clientsList = await searchRes.json();
           if (Array.isArray(clientsList) && clientsList.length > 0) {
             const firstClient = clientsList[0];
-            const detailRes = await fetch(`/api/clientes/${firstClient.id}`);
+            const detailRes = await fetch(`/api/clientes/${firstClient.id}`, { credentials: 'include' });
             if (detailRes.ok) {
               const fullData: ClientWithFullProfile = await detailRes.json();
               setClientProfile(fullData);
@@ -264,7 +253,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
   // Direct WhatsApp link
   const cleanPhone = (appointment.telefono || '').replace(/\D/g, '');
   const waUrl = `https://wa.me/${cleanPhone.startsWith('54') ? cleanPhone : `549${cleanPhone}`}?text=${encodeURIComponent(
-    `Hola ${appointment.nombre}, te contacto desde Gwen Nails respecto a tu turno del ${appointment.fecha} a las ${appointment.horaInicio} hs.`
+    `Hola ${appointment.nombre}, te contacto desde Gwen Nails respecto a tu turno del ${isoDateToAR(appointment.fecha)} a las ${appointment.horaInicio} hs.`
   )}`;
 
   // Status badge styling
@@ -434,7 +423,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="inline-flex items-center gap-1 font-semibold text-[#8E4455] bg-rose-50/90 px-2.5 py-1 rounded-lg border border-rose-200/80">
                       <Calendar className="w-3.5 h-3.5" />
-                      <span>{appointment.fecha}</span>
+                      <span>{isoDateToAR(appointment.fecha)}</span>
                     </span>
                     <span className="inline-flex items-center gap-1 font-semibold text-[#241E1A] bg-white px-2.5 py-1 rounded-lg border border-[#E8DCD5]">
                       <Clock className="w-3.5 h-3.5 text-[#8C7A70]" />
@@ -570,7 +559,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                   <div className="bg-white/80 p-2.5 rounded-lg border border-rose-100">
                     <span className="text-[#8C7A70] text-[10px] uppercase font-bold tracking-wider block mb-0.5">Fecha y Hora de Cancelación:</span>
                     <span className="font-medium text-[#241E1A]">
-                      {appointment.canceladoEn ? new Date(appointment.canceladoEn).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' }) : 'No registrada'}
+                      {appointment.canceladoEn ? formatDateTimeAR(appointment.canceladoEn) : 'No registrada'}
                     </span>
                   </div>
                   <div className="bg-white/80 p-2.5 rounded-lg border border-rose-100">
@@ -675,7 +664,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                                   <span className="text-[10px] text-[#8C7A70] italic">(Inactiva)</span>
                                 )}
                               </div>
-                              <span className="text-[11px] text-[#8C7A70]">{alert.fecha}</span>
+                              <span className="text-[11px] text-[#8C7A70]">{isoDateToAR(alert.fecha)}</span>
                             </div>
 
                             <p className="text-xs text-[#241E1A] font-medium mt-1">
@@ -949,7 +938,7 @@ export const AppointmentDetailModal: React.FC<AppointmentDetailModalProps> = ({
                     <span className="text-[#8C7A70] block mb-0.5">Fecha:</span>
                     <span className="font-medium text-[#241E1A] flex items-center gap-1">
                       <Calendar className="w-3.5 h-3.5 text-[#8E4455]" />
-                      {previousCompletedAppointment.fecha}
+                      {isoDateToAR(previousCompletedAppointment.fecha)}
                     </span>
                   </div>
                   <div>

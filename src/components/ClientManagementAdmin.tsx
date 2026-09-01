@@ -51,6 +51,10 @@ import type {
 import { ClientAlertsSection } from './ClientAlertsSection.js';
 import { ClientPreferencesSection } from './ClientPreferencesSection.js';
 import { ClientTipsSection } from './ClientTipsSection.js';
+import { 
+  isoDateToAR, 
+  formatDateLongAR 
+} from '../utils/dateUtils.js';
 
 interface ClientManagementAdminProps {
   services: Service[];
@@ -150,10 +154,10 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
     setIsLoading(true);
     try {
       const [clientsRes, statsRes, dupesRes, configRes] = await Promise.all([
-        fetch(`/api/clientes?category=${categoryFilter}&search=${encodeURIComponent(searchQuery)}`),
-        fetch('/api/clientes/stats'),
-        fetch('/api/clientes/duplicados'),
-        fetch('/api/config')
+        fetch(`/api/clientes?category=${categoryFilter}&search=${encodeURIComponent(searchQuery)}`, { credentials: 'include' }),
+        fetch('/api/clientes/stats', { credentials: 'include' }),
+        fetch('/api/clientes/duplicados', { credentials: 'include' }),
+        fetch('/api/config', { credentials: 'include' })
       ]);
 
       if (clientsRes.ok) {
@@ -263,7 +267,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
         if (onClearInitialClientLookup) onClearInitialClientLookup();
       } else if (initialClientLookup.id) {
         try {
-          const res = await fetch(`/api/clientes/${initialClientLookup.id}`);
+          const res = await fetch(`/api/clientes/${initialClientLookup.id}`, { credentials: 'include' });
           if (res.ok) {
             const data: ClientWithFullProfile = await res.json();
             if (data.client) {
@@ -292,6 +296,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
       const res = await fetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ diasInactividadCliente: Number(tempInactivityInput) })
       });
 
@@ -323,6 +328,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
       const res = await fetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ minTurnosRecurrente: Number(tempRecurrentInput) })
       });
 
@@ -354,7 +360,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
     setDrawerActiveTab(initialTab);
     setIsLoadingHistory(true);
     try {
-      const res = await fetch(`/api/clientes/${client.id}`);
+      const res = await fetch(`/api/clientes/${client.id}`, { credentials: 'include' });
       if (res.ok) {
         const data: ClientWithFullProfile = await res.json();
         setSelectedClient(data.client);
@@ -373,7 +379,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
   const handleRefreshCurrentClientProfile = async () => {
     if (!selectedClient) return;
     try {
-      const res = await fetch(`/api/clientes/${selectedClient.id}`);
+      const res = await fetch(`/api/clientes/${selectedClient.id}`, { credentials: 'include' });
       if (res.ok) {
         const data: ClientWithFullProfile = await res.json();
         setSelectedClient(data.client);
@@ -441,6 +447,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
       const res = await fetch(`/api/clientes/${editingClient.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
@@ -478,6 +485,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
       const res = await fetch('/api/clientes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
@@ -527,6 +535,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
       const res = await fetch('/api/clientes/fusionar', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           primaryId: primaryClientId,
           secondaryId,
@@ -557,6 +566,7 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
       const res = await fetch('/api/clientes/descartar-duplicado', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           idA: pair.clienteA.id,
           idB: pair.clienteB.id
@@ -575,28 +585,12 @@ export const ClientManagementAdmin: React.FC<ClientManagementAdminProps> = ({
   // Helpers
   const formatClienteDesdeDate = (iso?: string) => {
     if (!iso) return 'Fecha no registrada';
-    try {
-      const dateOnly = iso.split('T')[0];
-      const [y, m, d] = dateOnly.split('-');
-      if (y && m && d) {
-        const dateObj = new Date(Number(y), Number(m) - 1, Number(d));
-        if (!isNaN(dateObj.getTime())) {
-          return dateObj.toLocaleDateString('es-AR', { day: 'numeric', month: 'long', year: 'numeric' });
-        }
-        return `${d}/${m}/${y}`;
-      }
-    } catch (e) {
-      // fallback
-    }
-    return iso;
+    return formatDateLongAR(iso);
   };
 
   const formatDateFriendly = (iso?: string) => {
     if (!iso) return 'Sin visitas';
-    const datePart = iso.split('T')[0];
-    const [y, m, d] = datePart.split('-');
-    if (!y || !m || !d) return iso;
-    return `${d}/${m}/${y}`;
+    return isoDateToAR(iso);
   };
 
   const getInitials = (nombre: string, apellido: string) => {

@@ -33,6 +33,11 @@ import type {
   ClientBenefit, 
   ValidateDiscountResult 
 } from '../types.js';
+import { 
+  getBusinessDate, 
+  isoDateToAR, 
+  formatDateWithWeekdayAR 
+} from '../utils/dateUtils.js';
 
 interface BookingSectionProps {
   services: Service[];
@@ -138,17 +143,17 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
   // Set default initial date to tomorrow or today
   useEffect(() => {
     if (!selectedDate) {
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      const todayBusiness = getBusinessDate();
+      const [y, m, d] = todayBusiness.split('-').map(Number);
+      const tomorrow = new Date(y, m - 1, d + 1);
       // If tomorrow is Sunday, advance to Monday
       if (tomorrow.getDay() === 0) {
         tomorrow.setDate(tomorrow.getDate() + 1);
       }
-      const yyyy = tomorrow.getFullYear();
-      const mm = String(tomorrow.getMonth() + 1).padStart(2, '0');
-      const dd = String(tomorrow.getDate()).padStart(2, '0');
-      setSelectedDate(`${yyyy}-${mm}-${dd}`);
-      setCalendarMonth(new Date(yyyy, tomorrow.getMonth(), 1));
+      const dateStr = getBusinessDate(tomorrow);
+      setSelectedDate(dateStr);
+      const [ty, tm] = dateStr.split('-').map(Number);
+      setCalendarMonth(new Date(ty, tm - 1, 1));
     }
   }, [selectedDate]);
 
@@ -267,19 +272,19 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
       days.push(null);
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const todayBusiness = getBusinessDate();
 
     for (let d = 1; d <= totalDays; d++) {
       const curDate = new Date(year, month, d);
-      const isPast = curDate < today;
       const isSunday = curDate.getDay() === 0;
       const yyyy = year;
       const mm = String(month + 1).padStart(2, '0');
       const dd = String(d).padStart(2, '0');
+      const dateStr = `${yyyy}-${mm}-${dd}`;
+      const isPast = dateStr < todayBusiness;
       days.push({
         dayNumber: d,
-        dateStr: `${yyyy}-${mm}-${dd}`,
+        dateStr,
         isPast,
         isSunday,
       });
@@ -705,7 +710,7 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
                 <div>
                   <span className="text-[#8C7A70] block text-xs">Fecha & Horario:</span>
                   <span className="font-medium text-[#241E1A]">
-                    {confirmedBooking.turno.fecha} · {confirmedBooking.turno.horaInicio} a {confirmedBooking.turno.horaFin} hs
+                    {isoDateToAR(confirmedBooking.turno.fecha)} · {confirmedBooking.turno.horaInicio} a {confirmedBooking.turno.horaFin} hs
                   </span>
                 </div>
                 <div>
@@ -1006,7 +1011,7 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
                   <div className="md:col-span-6">
                     <div className="flex items-center justify-between mb-3">
                       <span className="text-xs font-medium text-[#4A3E39]">
-                        Horarios Disponibles para {selectedDate || 'la fecha'}:
+                        Horarios Disponibles para {selectedDate ? isoDateToAR(selectedDate) : 'la fecha'}:
                       </span>
                       {availability && availability.abierto && (
                         <span className="text-[11px] bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-md border border-emerald-200">
@@ -1272,7 +1277,7 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
                                   )}
                                   {benefit.fechaVencimiento && (
                                     <p className="text-[10px] text-[#8C7A70] mt-0.5">
-                                      Válido hasta: {benefit.fechaVencimiento}
+                                      Válido hasta: {isoDateToAR(benefit.fechaVencimiento)}
                                     </p>
                                   )}
                                 </div>
@@ -1437,7 +1442,7 @@ export const BookingSection: React.FC<BookingSectionProps> = ({
                     <div className="bg-[#FAF7F2] p-3 rounded-xl border border-[#E8DCD5]">
                       <span className="text-[#8C7A70] block">Fecha</span>
                       <span className="font-medium text-[#241E1A] block truncate">
-                        {selectedDate || 'No seleccionada'}
+                        {selectedDate ? isoDateToAR(selectedDate) : 'No seleccionada'}
                       </span>
                     </div>
 
